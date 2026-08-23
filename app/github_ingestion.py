@@ -124,7 +124,11 @@ class GitHubIngestionService:
 
         while True:
             data = self._run_query(PR_QUERY, {"owner": owner, "repo": repo, "after": cursor})
-            pr_connection = data["data"]["repository"]["pullRequests"]
+            repository_data = data["data"]["repository"]
+            if repository_data is None:
+                logger.warning("Repository %s/%s not found on GitHub; skipping.", owner, repo)
+                break
+            pr_connection = repository_data["pullRequests"]
             nodes: list[dict] = pr_connection["nodes"]
             page_info: dict = pr_connection["pageInfo"]
 
@@ -160,10 +164,10 @@ class GitHubIngestionService:
             - {""}
         )
 
-        # Total review comments = sum of comments on each review thread + top-level PR comments.
-        review_comment_count: int = sum(
-            r["comments"]["totalCount"] for r in review_nodes
-        ) + node["comments"]["totalCount"]
+        # Total review comments = aggregated count from the reviews connection
+        # plus top-level PR comments.  Using totalCount avoids undercounting
+        # when there are more than 100 review threads.
+        review_comment_count: int = node["reviews"]["totalCount"] + node["comments"]["totalCount"]
 
         return {
             "repository": f"{owner}/{repo}",
