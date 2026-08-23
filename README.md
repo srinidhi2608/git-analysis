@@ -2,7 +2,7 @@
 
 This project provides:
 - A FastAPI backend for Git analytics endpoints
-- A React dashboard component at `/home/runner/work/git-analysis/git-analysis/frontend/src/components/GitAnalyticsDashboard.tsx`
+- A React dashboard component at `frontend/src/components/GitAnalyticsDashboard.tsx`
 
 ## 1) Prerequisites
 
@@ -12,14 +12,14 @@ This project provides:
 
 ## 2) Required properties to set **before start**
 
-Create `.env` in `/home/runner/work/git-analysis/git-analysis`:
+Create `.env` in the project root directory:
 
 ```env
 DATABASE_URL=postgresql://<db_user>:<db_password>@localhost:5432/git_analysis
 GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
-Update `/home/runner/work/git-analysis/git-analysis/config.yaml` with repositories:
+Update `config.yaml` in the project root with repositories:
 
 ```yaml
 repositories:
@@ -35,7 +35,7 @@ Required property values:
 
 ## 3) Backend setup and start commands
 
-From `/home/runner/work/git-analysis/git-analysis`:
+From the project root directory:
 
 ```bash
 python -m venv .venv
