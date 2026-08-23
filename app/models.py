@@ -36,6 +36,7 @@ class PullRequest(Base):
     developer_id: Mapped[int] = mapped_column(Integer, ForeignKey("developers.id"), nullable=False)
     pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
+    user_story_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     merged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     cycle_time_minutes: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
