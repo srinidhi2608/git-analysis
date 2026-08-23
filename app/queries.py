@@ -46,6 +46,7 @@ def get_team_performance_metrics(db: Session, days: int = 30):
             team_name,
             func.count(Commit.id).label("total_commits"),
         )
+        .select_from(Commit)
         .join(PullRequest, Commit.pr_id == PullRequest.id)
         .join(Developer, PullRequest.developer_id == Developer.id)
         .where(PullRequest.created_at >= since)
@@ -68,7 +69,12 @@ def get_team_performance_metrics(db: Session, days: int = 30):
 
 
 def get_developer_metrics(db: Session, github_username: str):
-    """Return aggregate metrics for a single developer."""
+    """Return aggregate metrics for a single developer.
+
+    Rework is approximated as additional commits beyond the first commit on
+    each PR because the current schema does not store the timestamps required
+    to calculate post-review commits exactly.
+    """
     pr_aggregates = (
         select(
             PullRequest.developer_id.label("developer_id"),
@@ -79,15 +85,24 @@ def get_developer_metrics(db: Session, github_username: str):
         .subquery()
     )
 
-    commit_aggregates = (
+    per_pr_rework = (
         select(
             PullRequest.developer_id.label("developer_id"),
-            (
-                func.count(Commit.id) - func.count(func.distinct(Commit.pr_id))
-            ).label("rework_count"),
+            Commit.pr_id.label("pr_id"),
+            (func.count(Commit.id) - 1).label("rework_count"),
         )
+        .select_from(Commit)
         .join(PullRequest, Commit.pr_id == PullRequest.id)
-        .group_by(PullRequest.developer_id)
+        .group_by(PullRequest.developer_id, Commit.pr_id)
+        .subquery()
+    )
+
+    commit_aggregates = (
+        select(
+            per_pr_rework.c.developer_id,
+            func.coalesce(func.sum(per_pr_rework.c.rework_count), 0).label("rework_count"),
+        )
+        .group_by(per_pr_rework.c.developer_id)
         .subquery()
     )
 
