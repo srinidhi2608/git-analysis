@@ -60,14 +60,55 @@ Open these in browser to confirm backend is working:
 4. `http://localhost:8000/api/team-performance`
 5. `http://localhost:8000/api/developers/<github_username>`
 
-## 5) Dashboard component test screens
+## 5) Dashboard component test screens (React app)
 
-The dashboard component includes two UI screens (tabs):
-- **Team Overview**
-- **Individual Performance**
+This repository contains the component at `frontend/src/components/GitAnalyticsDashboard.tsx`, but does not include a full React app shell.  
+Use the steps below in your React app to test it.
 
-To test the dashboard UI, mount `GitAnalyticsDashboard` in your React app and run that app (for example with `npm run dev` or `npm start` in your React project).  
-Verify:
-- Tab switch between **Team Overview** and **Individual Performance**
-- Bar chart renders: **Average PR Cycle Time by Developer**
-- Line chart renders: **Total PRs Merged per Week**
+### 5.1 Add dependencies
+
+In your React project directory:
+
+```bash
+npm install recharts
+```
+
+Make sure Tailwind CSS is already configured in your React app.
+
+### 5.2 Add the dashboard component
+
+1. Copy `frontend/src/components/GitAnalyticsDashboard.tsx` into your React app (for example: `src/components/GitAnalyticsDashboard.tsx`).
+2. Import and render it from your app entry screen (for example in `src/App.tsx`):
+   - render `<GitAnalyticsDashboard />`
+
+### 5.3 Start the React app
+
+From your React project root:
+
+```bash
+npm run dev
+```
+
+If your project uses Create React App, use:
+
+```bash
+npm start
+```
+
+Open the local URL printed in terminal (commonly `http://localhost:5173` for Vite or `http://localhost:3000` for CRA).
+
+### 5.4 What to verify on screen
+
+1. Page loads with title: **Engineering Performance Dashboard**
+2. Two tabs are visible:
+   - **Team Overview**
+   - **Individual Performance**
+3. **Team Overview** tab checks:
+   - 3 KPI cards are visible
+   - Bar chart is visible with title **Average PR Cycle Time by Developer**
+   - Line chart is visible with title **Total PRs Merged per Week**
+4. Switch to **Individual Performance** tab:
+   - KPI cards update
+   - First chart title changes to **Average PR Cycle Time Trend**
+   - Second chart still shows **Total PRs Merged per Week**
+5. Hover over chart points/bars and confirm tooltips appear.
