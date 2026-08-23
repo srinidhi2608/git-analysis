@@ -7,6 +7,7 @@ This project provides:
 ## 1) Prerequisites
 
 - Python 3.11+  
+- Node.js 18+ and npm  
 - PostgreSQL running locally or remotely  
 - GitHub Personal Access Token (for ingestion use cases)
 
@@ -60,44 +61,36 @@ Open these in browser to confirm backend is working:
 4. `http://localhost:8000/api/team-performance`
 5. `http://localhost:8000/api/developers/<github_username>`
 
-## 5) Dashboard component test screens (React app)
+## 5) Dashboard UI setup and test screens (this repository)
 
-This repository contains the component at `frontend/src/components/GitAnalyticsDashboard.tsx`, but does not include a full React app shell.  
-Use the steps below in your React app to test it.
+### 5.1 Install frontend dependencies
 
-### 5.1 Add dependencies
-
-In your React project directory:
+From the project root:
 
 ```bash
-npm install recharts
+cd frontend
+npm install
 ```
 
-Make sure Tailwind CSS is already configured in your React app.
+> If you see `'vite' is not recognized`, dependencies are not installed yet. Run `npm install` in `frontend` first.
 
-### 5.2 Add the dashboard component
+### 5.2 Start the React app
 
-1. Copy `frontend/src/components/GitAnalyticsDashboard.tsx` into your React app (for example: `src/components/GitAnalyticsDashboard.tsx`).
-2. Import and render it from your app entry screen (for example in `src/App.tsx`):
-   - render `<GitAnalyticsDashboard />`
-
-### 5.3 Start the React app
-
-From your React project root:
+From `frontend`:
 
 ```bash
 npm run dev
 ```
 
-If your project uses Create React App, use:
+Alternative:
 
 ```bash
 npm start
 ```
 
-Open the local URL printed in terminal (commonly `http://localhost:5173` for Vite or `http://localhost:3000` for CRA).
+Open `http://localhost:5173` (or the URL shown in terminal).
 
-### 5.4 What to verify on screen
+### 5.3 What to verify on screen
 
 1. Page loads with title: **Engineering Performance Dashboard**
 2. Two tabs are visible:

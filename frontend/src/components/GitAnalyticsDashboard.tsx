@@ -51,6 +51,7 @@ const individualPrMerge = [
 
 export default function GitAnalyticsDashboard() {
   const [activeTab, setActiveTab] = useState<TabKey>("team");
+  const isTeamView = activeTab === "team";
 
   const overviewCards = useMemo(() => {
     if (activeTab === "team") {
@@ -68,8 +69,7 @@ export default function GitAnalyticsDashboard() {
     ];
   }, [activeTab]);
 
-  const cycleData = activeTab === "team" ? averagePrCycleByDeveloper : individualCycleTime;
-  const prData = activeTab === "team" ? prsMergedPerWeek : individualPrMerge;
+  const prData = isTeamView ? prsMergedPerWeek : individualPrMerge;
 
   return (
     <div className="min-h-screen bg-slate-950 p-6 text-slate-100 md:p-8">
@@ -115,18 +115,29 @@ export default function GitAnalyticsDashboard() {
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/10">
             <h2 className="mb-4 text-sm font-medium text-slate-300">
-              {activeTab === "team" ? "Average PR Cycle Time by Developer" : "Average PR Cycle Time Trend"}
+              {isTeamView ? "Average PR Cycle Time by Developer" : "Average PR Cycle Time Trend"}
             </h2>
             <div className="h-80 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={cycleData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey={activeTab === "team" ? "developer" : "week"} stroke="#94a3b8" />
-                  <YAxis stroke="#94a3b8" />
-                  <Tooltip />
-                  <Legend />
-                  <Bar dataKey="cycleTimeHours" name="Cycle Time (hrs)" fill="#6366f1" radius={[6, 6, 0, 0]} />
-                </BarChart>
+                {isTeamView ? (
+                  <BarChart data={averagePrCycleByDeveloper}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis dataKey="developer" stroke="#94a3b8" />
+                    <YAxis stroke="#94a3b8" />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="cycleTimeHours" name="Cycle Time (hrs)" fill="#6366f1" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                ) : (
+                  <BarChart data={individualCycleTime}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis dataKey="week" stroke="#94a3b8" />
+                    <YAxis stroke="#94a3b8" />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="cycleTimeHours" name="Cycle Time (hrs)" fill="#6366f1" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                )}
               </ResponsiveContainer>
             </div>
           </div>
