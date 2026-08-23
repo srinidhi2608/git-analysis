@@ -114,9 +114,11 @@ export default function GitAnalyticsDashboard() {
 
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/10">
-            <h2 className="mb-4 text-sm font-medium text-slate-300">Average PR Cycle Time by Developer</h2>
+            <h2 className="mb-4 text-sm font-medium text-slate-300">
+              {activeTab === "team" ? "Average PR Cycle Time by Developer" : "Average PR Cycle Time Trend"}
+            </h2>
             <div className="h-80 w-full">
-              <ResponsiveContainer>
+              <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={cycleData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                   <XAxis dataKey={activeTab === "team" ? "developer" : "week"} stroke="#94a3b8" />
@@ -132,7 +134,7 @@ export default function GitAnalyticsDashboard() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/10">
             <h2 className="mb-4 text-sm font-medium text-slate-300">Total PRs Merged per Week</h2>
             <div className="h-80 w-full">
-              <ResponsiveContainer>
+              <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={prData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                   <XAxis dataKey="week" stroke="#94a3b8" />
