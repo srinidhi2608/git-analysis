@@ -164,10 +164,12 @@ class GitHubIngestionService:
             - {""}
         )
 
-        # Total review comments = aggregated count from the reviews connection
-        # plus top-level PR comments.  Using totalCount avoids undercounting
-        # when there are more than 100 review threads.
-        review_comment_count: int = node["reviews"]["totalCount"] + node["comments"]["totalCount"]
+        # Total review comments = sum of per-review comment counts (each review
+        # can contain multiple inline comments) plus top-level PR issue comments.
+        review_comment_count: int = (
+            sum(r["comments"]["totalCount"] for r in review_nodes)
+            + node["comments"]["totalCount"]
+        )
 
         return {
             "repository": f"{owner}/{repo}",

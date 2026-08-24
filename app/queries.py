@@ -165,19 +165,18 @@ def get_prs_per_week(db: Session, developer: str | None = None, weeks: int = 6):
 
     rows = db.execute(stmt).scalars().all()
 
-    # Bucket by ISO week
+    # Bucket by ISO year + week to avoid year-boundary collisions
     week_counts: dict[str, int] = {}
     for merged_at in rows:
         if merged_at is None:
             continue
         if isinstance(merged_at, str):
-            from datetime import datetime as _dt
-            merged_at = _dt.fromisoformat(merged_at)
+            merged_at = datetime.fromisoformat(merged_at)
         iso = merged_at.isocalendar()
-        label = f"W{iso[1]:02d}"
+        label = f"{iso[0]}-W{iso[1]:02d}"
         week_counts[label] = week_counts.get(label, 0) + 1
 
-    # Sort by week label and return
+    # Sort chronologically (year-week labels sort correctly as strings)
     sorted_weeks = sorted(week_counts.items())
     return [{"week": w, "mergedPrs": c} for w, c in sorted_weeks]
 

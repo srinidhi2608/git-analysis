@@ -58,6 +58,8 @@ def run_ingestion(db: Session) -> int:
 
     upserted = 0
     for pr_data in prs:
+        # Use a savepoint so a failure on one PR does not corrupt the session
+        savepoint = db.begin_nested()
         try:
             repo_name: str = pr_data["repository"]
             pr_number: int = pr_data["pr_number"]
@@ -65,6 +67,7 @@ def run_ingestion(db: Session) -> int:
 
             if not author:
                 logger.debug("PR #%s in %s has no author; skipping.", pr_number, repo_name)
+                savepoint.rollback()
                 continue
 
             repo = _upsert_repository(db, repo_name)
@@ -107,8 +110,10 @@ def run_ingestion(db: Session) -> int:
                 existing.cycle_time_minutes = cycle_time_minutes
                 existing.review_comments_count = review_comments_count
 
+            savepoint.commit()
             upserted += 1
         except Exception:
+            savepoint.rollback()
             logger.exception("Failed to persist PR %s from %s.", pr_data.get("pr_number"), pr_data.get("repository"))
 
     db.commit()
