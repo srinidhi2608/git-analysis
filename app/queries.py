@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Commit, Developer, PullRequest
+from app.models import Commit, Developer, PullRequest, Repository
 
 
 def _utc_now_naive() -> datetime:
@@ -120,3 +120,64 @@ def get_developer_metrics(db: Session, github_username: str):
     )
 
     return db.execute(stmt).mappings().one_or_none()
+
+
+def get_all_developers(db: Session):
+    """Return all known developers."""
+    stmt = select(Developer.github_username, Developer.team_name).order_by(Developer.github_username)
+    return db.execute(stmt).mappings().all()
+
+
+def get_pr_cycle_time_by_developer(db: Session, days: int = 30):
+    """Return average PR cycle time (hours) per developer for the last N days."""
+    since = _utc_now_naive() - timedelta(days=days)
+    stmt = (
+        select(
+            Developer.github_username.label("developer"),
+            (func.avg(PullRequest.cycle_time_minutes) / 60).label("cycleTimeHours"),
+        )
+        .join(Developer, PullRequest.developer_id == Developer.id)
+        .where(PullRequest.created_at >= since)
+        .where(PullRequest.cycle_time_minutes.is_not(None))
+        .group_by(Developer.github_username)
+        .order_by(Developer.github_username)
+    )
+    rows = db.execute(stmt).mappings().all()
+    return [
+        {"developer": r["developer"], "cycleTimeHours": round(float(r["cycleTimeHours"]), 2)}
+        for r in rows
+    ]
+
+
+def get_prs_per_week(db: Session, developer: str | None = None, weeks: int = 6):
+    """Return merged PR count per ISO week label for the last N weeks."""
+    since = _utc_now_naive() - timedelta(weeks=weeks)
+
+    stmt = select(PullRequest.merged_at).where(
+        PullRequest.merged_at >= since,
+        PullRequest.merged_at.is_not(None),
+    )
+
+    if developer:
+        stmt = stmt.join(Developer, PullRequest.developer_id == Developer.id).where(
+            Developer.github_username == developer
+        )
+
+    rows = db.execute(stmt).scalars().all()
+
+    # Bucket by ISO week
+    week_counts: dict[str, int] = {}
+    for merged_at in rows:
+        if merged_at is None:
+            continue
+        if isinstance(merged_at, str):
+            from datetime import datetime as _dt
+            merged_at = _dt.fromisoformat(merged_at)
+        iso = merged_at.isocalendar()
+        label = f"W{iso[1]:02d}"
+        week_counts[label] = week_counts.get(label, 0) + 1
+
+    # Sort by week label and return
+    sorted_weeks = sorted(week_counts.items())
+    return [{"week": w, "mergedPrs": c} for w, c in sorted_weeks]
+
