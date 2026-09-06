@@ -113,7 +113,7 @@ export function AdvancedMetricsView({ pullRequests }: { pullRequests: PullReques
       pullRequests
         .filter((pr) => pr.createdAt && pr.mergedAt)
         .map((pr) => {
-          const createdAt = new Date(pr.createdAt ?? "").getTime();
+          const createdAt = new Date(pr.createdAt as string).getTime();
           const mergedAt = new Date(pr.mergedAt ?? "").getTime();
           const cycleTimeHours = Number.isFinite(createdAt) && Number.isFinite(mergedAt) ? (mergedAt - createdAt) / 3_600_000 : 0;
 

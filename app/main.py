@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from threading import Lock
+from threading import Event, Lock
 from typing import Any
 
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 active_repos: list = []
 _pr_cache: dict[int, tuple[datetime, list[dict[str, Any]]]] = {}
 _pr_cache_lock = Lock()
+_pr_cache_inflight: dict[int, Event] = {}
 _PR_CACHE_TTL = timedelta(seconds=60)
 
 # ---------------------------------------------------------------------------
@@ -165,23 +166,39 @@ def list_pull_requests_for_graphs(lookback_days: int = 7):
         raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
     try:
         pull_requests: list[dict[str, Any]] | None = None
-        now = datetime.now(timezone.utc)
-        with _pr_cache_lock:
-            cached = _pr_cache.get(lookback_days)
-            if cached and now - cached[0] <= _PR_CACHE_TTL:
-                pull_requests = cached[1]
-
-        if pull_requests is None:
-            service = GitHubIngestionService(lookback_days=lookback_days)
-            fetched_pull_requests = service.fetch_all()
+        while pull_requests is None:
+            should_fetch = False
+            wait_event: Event | None = None
+            now = datetime.now(timezone.utc)
             with _pr_cache_lock:
-                current_now = datetime.now(timezone.utc)
                 cached = _pr_cache.get(lookback_days)
-                if cached and current_now - cached[0] <= _PR_CACHE_TTL:
+                if cached and now - cached[0] <= _PR_CACHE_TTL:
                     pull_requests = cached[1]
+                    break
+
+                inflight_event = _pr_cache_inflight.get(lookback_days)
+                if inflight_event is None:
+                    wait_event = Event()
+                    _pr_cache_inflight[lookback_days] = wait_event
+                    should_fetch = True
                 else:
-                    _pr_cache[lookback_days] = (current_now, fetched_pull_requests)
-                    pull_requests = fetched_pull_requests
+                    wait_event = inflight_event
+
+            if should_fetch and wait_event is not None:
+                fetched_pull_requests: list[dict[str, Any]] | None = None
+                try:
+                    service = GitHubIngestionService(lookback_days=lookback_days)
+                    fetched_pull_requests = service.fetch_all()
+                finally:
+                    with _pr_cache_lock:
+                        if fetched_pull_requests is not None:
+                            _pr_cache[lookback_days] = (datetime.now(timezone.utc), fetched_pull_requests)
+                        _pr_cache_inflight.pop(lookback_days, None)
+                        wait_event.set()
+
+                pull_requests = fetched_pull_requests
+            elif wait_event is not None:
+                wait_event.wait(timeout=30)
     except RateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:
