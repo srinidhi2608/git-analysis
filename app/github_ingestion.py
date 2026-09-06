@@ -26,7 +26,7 @@ PR_QUERY = """
 query($owner: String!, $repo: String!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequests(
-      states: [CLOSED, MERGED]
+      states: [CLOSED, MERGED, OPEN]
       orderBy: { field: UPDATED_AT, direction: DESC }
       first: 100
       after: $after
