@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from typing import Any
 
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 active_repos: list = []
 _pr_cache: dict[int, tuple[datetime, list[dict[str, Any]]]] = {}
+_pr_cache_lock = Lock()
 _PR_CACHE_TTL = timedelta(seconds=60)
 
 # ---------------------------------------------------------------------------
@@ -162,14 +164,15 @@ def list_pull_requests_for_graphs(lookback_days: int = 7):
     if lookback_days < 1:
         raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
     try:
-        now = datetime.now(timezone.utc)
-        cached = _pr_cache.get(lookback_days)
-        if cached and now - cached[0] <= _PR_CACHE_TTL:
-            pull_requests = cached[1]
-        else:
-            service = GitHubIngestionService(lookback_days=lookback_days)
-            pull_requests = service.fetch_all()
-            _pr_cache[lookback_days] = (now, pull_requests)
+        with _pr_cache_lock:
+            now = datetime.now(timezone.utc)
+            cached = _pr_cache.get(lookback_days)
+            if cached and now - cached[0] <= _PR_CACHE_TTL:
+                pull_requests = cached[1]
+            else:
+                service = GitHubIngestionService(lookback_days=lookback_days)
+                pull_requests = service.fetch_all()
+                _pr_cache[lookback_days] = (now, pull_requests)
     except RateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:
@@ -179,9 +182,9 @@ def list_pull_requests_for_graphs(lookback_days: int = 7):
     return [
         {
             "number": pr["pr_number"],
-            "title": pr["title"],
-            "createdAt": pr["created_at"],
-            "mergedAt": pr["merged_at"],
+            "title": pr.get("title", ""),
+            "createdAt": pr.get("created_at", ""),
+            "mergedAt": pr.get("merged_at"),
             "closedAt": pr.get("closed_at"),
             "author": {"login": pr.get("author") or "unknown"},
             "reviews": {"totalCount": int(pr.get("reviews_total_count", 0) or 0)},
@@ -190,6 +193,7 @@ def list_pull_requests_for_graphs(lookback_days: int = 7):
             "reviewDecision": pr.get("review_decision"),
         }
         for pr in pull_requests
+        if pr.get("pr_number") is not None
     ]
 
 
