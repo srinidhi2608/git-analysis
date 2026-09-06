@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -61,6 +61,10 @@ class DeveloperItem(BaseModel):
 class IngestStatusResponse(BaseModel):
     status: str
     message: str
+
+
+class IngestRequest(BaseModel):
+    lookback_days: int = 7
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +133,11 @@ def chart_prs_per_week(db: Session = Depends(get_db), developer: str | None = No
     return get_prs_per_week(db, developer=developer)
 
 
-def _background_ingest():
+def _background_ingest(lookback_days: int = 7):
     """Run ingestion in a background thread with its own DB session."""
     db = SessionLocal()
     try:
-        run_ingestion(db)
+        run_ingestion(db, lookback_days=lookback_days)
     except Exception:
         logger.exception("Background ingestion failed.")
     finally:
@@ -141,10 +145,16 @@ def _background_ingest():
 
 
 @app.post("/api/ingest", response_model=IngestStatusResponse)
-def trigger_ingest(background_tasks: BackgroundTasks):
+def trigger_ingest(
+    background_tasks: BackgroundTasks,
+    payload: IngestRequest = Body(default_factory=IngestRequest),
+):
     """Trigger GitHub data ingestion into Postgres (runs in background)."""
-    background_tasks.add_task(_background_ingest)
+    if payload.lookback_days < 1:
+        raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
+
+    background_tasks.add_task(_background_ingest, payload.lookback_days)
     return IngestStatusResponse(
         status="accepted",
-        message="Ingestion started in the background. Refresh data in a few seconds.",
+        message=f"Ingestion started in the background for the last {payload.lookback_days} days. Refresh data in a few seconds.",
     )
