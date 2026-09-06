@@ -196,6 +196,8 @@ def list_pull_requests_for_graphs(lookback_days: int = 7):
                         _pr_cache_inflight.pop(lookback_days, None)
                         wait_event.set()
 
+                if fetched_pull_requests is None:
+                    raise RuntimeError("GitHub pull request fetch returned no data.")
                 pull_requests = fetched_pull_requests
             elif wait_event is not None:
                 wait_event.wait(timeout=30)
@@ -204,6 +206,9 @@ def list_pull_requests_for_graphs(lookback_days: int = 7):
     except Exception as exc:
         logger.exception("Failed to fetch pull requests from GitHub.")
         raise HTTPException(status_code=502, detail="Failed to fetch pull requests from GitHub.") from exc
+
+    if pull_requests is None:
+        raise HTTPException(status_code=502, detail="Failed to fetch pull requests from GitHub.")
 
     return [
         {
