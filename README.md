@@ -67,14 +67,16 @@ Database tables are created automatically on first start.
 Data is fetched from the GitHub GraphQL API using the PAT in `.env`.  
 You can trigger ingestion two ways:
 
-**From the UI** — click the **⟳ Sync from GitHub** button in the dashboard header.
+**From the UI** — click the **⟳ Sync from GitHub** button in the dashboard header. The dashboard includes a **Lookback** field that sends the requested number of days to the backend.
 
 **From the command line / curl:**
 ```bash
-curl -X POST http://localhost:8000/api/ingest
+curl -X POST http://localhost:8000/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"lookback_days": 30}'
 ```
 
-Ingestion fetches closed/merged PRs from the last 7 days for all active repositories and upserts them into Postgres.
+Ingestion fetches closed/merged PRs for the selected lookback window (default: 7 days) for all active repositories and upserts them into Postgres.
 
 ## 6) Dashboard UI setup
 

@@ -44,7 +44,7 @@ def _upsert_repository(db: Session, name: str) -> Repository:
     return repo
 
 
-def run_ingestion(db: Session) -> int:
+def run_ingestion(db: Session, lookback_days: int = 7) -> int:
     """Fetch GitHub PR data and persist it to the database.
 
     Returns
@@ -52,7 +52,7 @@ def run_ingestion(db: Session) -> int:
     int
         Number of pull requests upserted.
     """
-    service = GitHubIngestionService()
+    service = GitHubIngestionService(lookback_days=lookback_days)
     prs = service.fetch_all()
     logger.info("Fetched %d pull requests from GitHub.", len(prs))
 
