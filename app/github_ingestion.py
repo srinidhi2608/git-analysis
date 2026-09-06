@@ -182,7 +182,6 @@ class GitHubIngestionService:
             "closed_at": node.get("closedAt"),
             "reviews_total_count": node["reviews"]["totalCount"],
             "comments_total_count": node["comments"]["totalCount"],
-            "commits_total_count": node["commits"]["totalCount"],
             "review_decision": node.get("reviewDecision"),
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
