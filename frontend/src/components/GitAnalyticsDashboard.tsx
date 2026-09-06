@@ -87,8 +87,8 @@ function AdvancedMetricCard({
 }
 
 export function AdvancedMetricsView({ pullRequests }: { pullRequests: PullRequestData[] }) {
-  const HIGH_COMMITS_THRESHOLD = 8;
-  const HIGH_ABANDONMENT_THRESHOLD = 20;
+  const HIGH_COMMITS_THRESHOLD = 10;
+  const HIGH_ABANDONMENT_THRESHOLD = 10;
 
   const metrics = useMemo(() => {
     const totalPrs = pullRequests.length;
