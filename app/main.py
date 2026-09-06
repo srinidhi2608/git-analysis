@@ -74,7 +74,7 @@ class PullRequestCountMetric(BaseModel):
 class PullRequestGraphItem(BaseModel):
     number: int
     title: str
-    createdAt: str
+    createdAt: str | None
     mergedAt: str | None
     closedAt: str | None
     author: PullRequestActor
@@ -164,15 +164,24 @@ def list_pull_requests_for_graphs(lookback_days: int = 7):
     if lookback_days < 1:
         raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
     try:
+        pull_requests: list[dict[str, Any]] | None = None
+        now = datetime.now(timezone.utc)
         with _pr_cache_lock:
-            now = datetime.now(timezone.utc)
             cached = _pr_cache.get(lookback_days)
             if cached and now - cached[0] <= _PR_CACHE_TTL:
                 pull_requests = cached[1]
-            else:
-                service = GitHubIngestionService(lookback_days=lookback_days)
-                pull_requests = service.fetch_all()
-                _pr_cache[lookback_days] = (now, pull_requests)
+
+        if pull_requests is None:
+            service = GitHubIngestionService(lookback_days=lookback_days)
+            fetched_pull_requests = service.fetch_all()
+            with _pr_cache_lock:
+                current_now = datetime.now(timezone.utc)
+                cached = _pr_cache.get(lookback_days)
+                if cached and current_now - cached[0] <= _PR_CACHE_TTL:
+                    pull_requests = cached[1]
+                else:
+                    _pr_cache[lookback_days] = (current_now, fetched_pull_requests)
+                    pull_requests = fetched_pull_requests
     except RateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:
@@ -183,7 +192,7 @@ def list_pull_requests_for_graphs(lookback_days: int = 7):
         {
             "number": pr["pr_number"],
             "title": pr.get("title", ""),
-            "createdAt": pr.get("created_at", ""),
+            "createdAt": pr.get("created_at"),
             "mergedAt": pr.get("merged_at"),
             "closedAt": pr.get("closed_at"),
             "author": {"login": pr.get("author") or "unknown"},
