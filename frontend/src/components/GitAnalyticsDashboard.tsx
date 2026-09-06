@@ -53,69 +53,6 @@ interface TeamPerformance {
   total_prs: number;
 }
 
-const mockAdvancedPullRequests: PullRequestData[] = [
-  {
-    number: 417,
-    title: "Fix race condition in auth token refresh",
-    createdAt: "2024-06-04T09:00:00Z",
-    mergedAt: "2024-06-04T18:30:00Z",
-    closedAt: "2024-06-04T18:30:00Z",
-    author: { login: "srinidhi2608" },
-    reviews: { totalCount: 0 },
-    comments: { totalCount: 2 },
-    commits: { totalCount: 17 },
-    reviewDecision: "MERGED",
-  },
-  {
-    number: 420,
-    title: "Improve dashboard loading state",
-    createdAt: "2024-06-05T08:15:00Z",
-    mergedAt: "2024-06-06T12:45:00Z",
-    closedAt: "2024-06-06T12:45:00Z",
-    author: { login: "amanda" },
-    reviews: { totalCount: 2 },
-    comments: { totalCount: 5 },
-    commits: { totalCount: 7 },
-    reviewDecision: "MERGED",
-  },
-  {
-    number: 431,
-    title: "Refactor PR summary query",
-    createdAt: "2024-06-07T13:00:00Z",
-    mergedAt: null,
-    closedAt: "2024-06-08T10:00:00Z",
-    author: { login: "jordan" },
-    reviews: { totalCount: 1 },
-    comments: { totalCount: 4 },
-    commits: { totalCount: 9 },
-    reviewDecision: "CHANGES_REQUESTED",
-  },
-  {
-    number: 438,
-    title: "Add GraphQL review metrics export",
-    createdAt: "2024-06-08T11:00:00Z",
-    mergedAt: "2024-06-08T19:15:00Z",
-    closedAt: "2024-06-08T19:15:00Z",
-    author: { login: "nina" },
-    reviews: { totalCount: 3 },
-    comments: { totalCount: 7 },
-    commits: { totalCount: 12 },
-    reviewDecision: "MERGED",
-  },
-  {
-    number: 445,
-    title: "Reduce API payload for repository metrics",
-    createdAt: "2024-06-09T15:30:00Z",
-    mergedAt: "2024-06-10T09:00:00Z",
-    closedAt: "2024-06-10T09:00:00Z",
-    author: { login: "ravi" },
-    reviews: { totalCount: 0 },
-    comments: { totalCount: 1 },
-    commits: { totalCount: 5 },
-    reviewDecision: "MERGED",
-  },
-];
-
 function AdvancedMetricCard({
   label,
   value,
@@ -149,11 +86,7 @@ function AdvancedMetricCard({
   );
 }
 
-export function AdvancedMetricsView({
-  pullRequests = mockAdvancedPullRequests,
-}: {
-  pullRequests?: PullRequestData[];
-}) {
+export function AdvancedMetricsView({ pullRequests }: { pullRequests: PullRequestData[] }) {
   const HIGH_COMMITS_THRESHOLD = 8;
   const HIGH_ABANDONMENT_THRESHOLD = 20;
 
@@ -353,6 +286,7 @@ export default function GitAnalyticsDashboard() {
   const [teamPrsPerWeek, setTeamPrsPerWeek] = useState<PrsPerWeekItem[]>([]);
   const [indivPrsPerWeek, setIndivPrsPerWeek] = useState<PrsPerWeekItem[]>([]);
   const [indivCycleTime, setIndivCycleTime] = useState<PrCycleItem[]>([]);
+  const [advancedPullRequests, setAdvancedPullRequests] = useState<PullRequestData[]>([]);
 
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -360,20 +294,22 @@ export default function GitAnalyticsDashboard() {
   const [error, setError] = useState("");
 
   const loadTeamData = useCallback(async () => {
-    const [perf, cycle, prsWeek, devs] = await Promise.all([
+    const [perf, cycle, prsWeek, devs, prs] = await Promise.all([
       apiFetch<TeamPerformance[]>("/api/team-performance"),
       apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
       apiFetch<PrsPerWeekItem[]>("/api/chart/prs-per-week"),
       apiFetch<DeveloperItem[]>("/api/developers"),
+      apiFetch<PullRequestData[]>(`/api/github/pull-requests?lookback_days=${encodeURIComponent(String(lookbackDays))}`),
     ]);
     setTeamPerf(perf);
     setCycleByDev(cycle);
     setTeamPrsPerWeek(prsWeek);
     setDevelopers(devs);
+    setAdvancedPullRequests(prs);
     if (!selectedDeveloper && devs.length > 0) {
       setSelectedDeveloper(devs[0].github_username);
     }
-  }, [selectedDeveloper]);
+  }, [lookbackDays, selectedDeveloper]);
 
   const loadIndividualData = useCallback(async (dev: string) => {
     if (!dev) return;
@@ -605,10 +541,8 @@ export default function GitAnalyticsDashboard() {
           </div>
         </div>
 
-        {/* Placeholder mock data for chart verification until live PR payload data is wired through the API. */}
-        <AdvancedMetricsView pullRequests={mockAdvancedPullRequests} />
+        <AdvancedMetricsView pullRequests={advancedPullRequests} />
       </div>
     </div>
   );
 }
-

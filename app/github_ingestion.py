@@ -179,6 +179,11 @@ class GitHubIngestionService:
             "reviewers": reviewer_logins,
             "created_at": node["createdAt"],
             "merged_at": node.get("mergedAt"),
+            "closed_at": node.get("closedAt"),
+            "reviews_total_count": node["reviews"]["totalCount"],
+            "comments_total_count": node["comments"]["totalCount"],
+            "commits_total_count": node["commits"]["totalCount"],
+            "review_decision": node.get("reviewDecision"),
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
         }

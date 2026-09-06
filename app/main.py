@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import Base, SessionLocal, engine, get_db
 from app.config_loader import load_active_repositories
+from app.github_ingestion import GitHubIngestionService, RateLimitError
 from app.queries import (
     get_developer_metrics,
     get_team_performance_metrics,
@@ -56,6 +57,27 @@ class PrsPerWeekItem(BaseModel):
 class DeveloperItem(BaseModel):
     github_username: str
     team_name: str | None
+
+
+class PullRequestActor(BaseModel):
+    login: str
+
+
+class PullRequestCountMetric(BaseModel):
+    totalCount: int
+
+
+class PullRequestGraphItem(BaseModel):
+    number: int
+    title: str
+    createdAt: str
+    mergedAt: str | None
+    closedAt: str | None
+    author: PullRequestActor
+    reviews: PullRequestCountMetric
+    comments: PullRequestCountMetric
+    commits: PullRequestCountMetric
+    reviewDecision: str | None
 
 
 class IngestStatusResponse(BaseModel):
@@ -131,6 +153,36 @@ def chart_pr_cycle_by_developer(db: Session = Depends(get_db)):
 @app.get("/api/chart/prs-per-week", response_model=list[PrsPerWeekItem])
 def chart_prs_per_week(db: Session = Depends(get_db), developer: str | None = None):
     return get_prs_per_week(db, developer=developer)
+
+
+@app.get("/api/github/pull-requests", response_model=list[PullRequestGraphItem])
+def list_pull_requests_for_graphs(lookback_days: int = 7):
+    if lookback_days < 1:
+        raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
+    try:
+        service = GitHubIngestionService(lookback_days=lookback_days)
+        pull_requests = service.fetch_all()
+    except RateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to fetch pull requests from GitHub.")
+        raise HTTPException(status_code=502, detail="Failed to fetch pull requests from GitHub.") from exc
+
+    return [
+        {
+            "number": pr["pr_number"],
+            "title": pr["title"],
+            "createdAt": pr["created_at"],
+            "mergedAt": pr["merged_at"],
+            "closedAt": pr.get("closed_at"),
+            "author": {"login": pr.get("author") or "unknown"},
+            "reviews": {"totalCount": int(pr.get("reviews_total_count", 0) or 0)},
+            "comments": {"totalCount": int(pr.get("comments_total_count", 0) or 0)},
+            "commits": {"totalCount": int(pr.get("commits_total_count", pr.get("commit_count", 0)) or 0)},
+            "reviewDecision": pr.get("review_decision"),
+        }
+        for pr in pull_requests
+    ]
 
 
 def _background_ingest(lookback_days: int = 7):
