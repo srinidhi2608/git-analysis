@@ -8,8 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.database import Base, SessionLocal, engine, get_db
+from app.database import SessionLocal, ensure_database_schema, get_db
 from app.config_loader import load_active_repositories
+from app.developer_analytics import get_developer_review_analytics
 from app.queries import (
     get_developer_metrics,
     get_team_performance_metrics,
@@ -67,6 +68,85 @@ class IngestRequest(BaseModel):
     lookback_days: int = 7
 
 
+class DeveloperAnalyticsMetricsResponse(BaseModel):
+    pull_request_count: int
+    merged_pull_request_count: int
+    total_review_comments: int
+    average_comments_per_pr: float
+    average_pr_size: float
+    average_changed_files: float
+    largest_pr_size: int
+    comment_density_per_100_lines: float
+    requested_changes_rate: float
+    average_rework_commits_per_pr: float
+    average_cycle_time_hours: float | None
+    average_time_to_first_followup_hours: float | None
+    average_time_to_merge_after_feedback_hours: float | None
+    large_pr_rate: float
+
+
+class CommentCategoryItem(BaseModel):
+    category: str
+    count: int
+
+
+class RepeatedIssueCategoryItem(BaseModel):
+    category: str
+    count: int
+    pull_request_count: int
+
+
+class DeveloperReviewPullRequestItem(BaseModel):
+    pr_number: int
+    title: str
+    created_at: str | None
+    merged_at: str | None
+    review_comments: int
+    requested_changes: int
+    rework_commits: int
+    size: int
+
+
+class DeveloperAnalyticsBreakdownResponse(BaseModel):
+    comment_categories: list[CommentCategoryItem]
+    repeated_issue_categories: list[RepeatedIssueCategoryItem]
+    pull_requests: list[DeveloperReviewPullRequestItem]
+
+
+class DeveloperAnalyticsCategorySummary(BaseModel):
+    key: str
+    label: str
+    score: int | None
+    assessment: str
+    evidence: list[str]
+
+
+class DeveloperAnalyticsSummaryResponse(BaseModel):
+    provider: str
+    confidence: str
+    overview: str
+    categories: list[DeveloperAnalyticsCategorySummary]
+    highlights: list[str]
+    risks: list[str]
+    recommendations: list[str]
+
+
+class DeveloperAnalyticsSampleResponse(BaseModel):
+    pull_requests: int
+    comment_text_items: int
+    followup_samples: int
+    resolution_samples: int
+
+
+class DeveloperAnalyticsResponse(BaseModel):
+    github_username: str
+    team_name: str | None
+    metrics: DeveloperAnalyticsMetricsResponse
+    breakdown: DeveloperAnalyticsBreakdownResponse
+    sample: DeveloperAnalyticsSampleResponse
+    summary: DeveloperAnalyticsSummaryResponse
+
+
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
@@ -74,7 +154,7 @@ class IngestRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    ensure_database_schema()
     global active_repos
     active_repos = load_active_repositories()
     yield
@@ -121,6 +201,14 @@ def developer_metrics(github_username: str, db: Session = Depends(get_db)):
     if metrics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return metrics
+
+
+@app.get("/api/developers/{github_username}/analytics", response_model=DeveloperAnalyticsResponse)
+def developer_analytics(github_username: str, db: Session = Depends(get_db)):
+    analytics = get_developer_review_analytics(db, github_username)
+    if analytics is None:
+        raise HTTPException(status_code=404, detail="Developer not found")
+    return analytics
 
 
 @app.get("/api/chart/pr-cycle-by-developer", response_model=list[PrCycleByDeveloperItem])

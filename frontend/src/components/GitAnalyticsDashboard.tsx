@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -7,8 +7,6 @@ import {
   Line,
   LineChart,
   ResponsiveContainer,
-  Scatter,
-  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
@@ -18,17 +16,9 @@ type TabKey = "team" | "individual";
 
 type TrendDirection = "up" | "down";
 
-interface PullRequestData {
-  number: number;
-  title: string;
-  createdAt: string;
-  mergedAt: string | null;
-  closedAt: string | null;
-  author: { login: string };
-  reviews: { totalCount: number };
-  comments: { totalCount: number };
-  commits: { totalCount: number };
-  reviewDecision: string | null;
+interface CommentCategoryItem {
+  category: string;
+  count: number;
 }
 
 interface PrCycleItem {
@@ -53,68 +43,67 @@ interface TeamPerformance {
   total_prs: number;
 }
 
-const mockAdvancedPullRequests: PullRequestData[] = [
-  {
-    number: 417,
-    title: "Fix race condition in auth token refresh",
-    createdAt: "2024-06-04T09:00:00Z",
-    mergedAt: "2024-06-04T18:30:00Z",
-    closedAt: "2024-06-04T18:30:00Z",
-    author: { login: "srinidhi2608" },
-    reviews: { totalCount: 0 },
-    comments: { totalCount: 2 },
-    commits: { totalCount: 17 },
-    reviewDecision: "MERGED",
-  },
-  {
-    number: 420,
-    title: "Improve dashboard loading state",
-    createdAt: "2024-06-05T08:15:00Z",
-    mergedAt: "2024-06-06T12:45:00Z",
-    closedAt: "2024-06-06T12:45:00Z",
-    author: { login: "amanda" },
-    reviews: { totalCount: 2 },
-    comments: { totalCount: 5 },
-    commits: { totalCount: 7 },
-    reviewDecision: "MERGED",
-  },
-  {
-    number: 431,
-    title: "Refactor PR summary query",
-    createdAt: "2024-06-07T13:00:00Z",
-    mergedAt: null,
-    closedAt: "2024-06-08T10:00:00Z",
-    author: { login: "jordan" },
-    reviews: { totalCount: 1 },
-    comments: { totalCount: 4 },
-    commits: { totalCount: 9 },
-    reviewDecision: "CHANGES_REQUESTED",
-  },
-  {
-    number: 438,
-    title: "Add GraphQL review metrics export",
-    createdAt: "2024-06-08T11:00:00Z",
-    mergedAt: "2024-06-08T19:15:00Z",
-    closedAt: "2024-06-08T19:15:00Z",
-    author: { login: "nina" },
-    reviews: { totalCount: 3 },
-    comments: { totalCount: 7 },
-    commits: { totalCount: 12 },
-    reviewDecision: "MERGED",
-  },
-  {
-    number: 445,
-    title: "Reduce API payload for repository metrics",
-    createdAt: "2024-06-09T15:30:00Z",
-    mergedAt: "2024-06-10T09:00:00Z",
-    closedAt: "2024-06-10T09:00:00Z",
-    author: { login: "ravi" },
-    reviews: { totalCount: 0 },
-    comments: { totalCount: 1 },
-    commits: { totalCount: 5 },
-    reviewDecision: "MERGED",
-  },
-];
+interface DeveloperAnalyticsPullRequestItem {
+  pr_number: number;
+  title: string;
+  created_at: string | null;
+  merged_at: string | null;
+  review_comments: number;
+  requested_changes: number;
+  rework_commits: number;
+  size: number;
+}
+
+interface DeveloperAnalyticsCategorySummary {
+  key: string;
+  label: string;
+  score: number | null;
+  assessment: string;
+  evidence: string[];
+}
+
+interface DeveloperAnalyticsSummary {
+  provider: string;
+  confidence: string;
+  overview: string;
+  categories: DeveloperAnalyticsCategorySummary[];
+  highlights: string[];
+  risks: string[];
+  recommendations: string[];
+}
+
+interface DeveloperAnalyticsResponse {
+  github_username: string;
+  team_name: string | null;
+  metrics: {
+    pull_request_count: number;
+    merged_pull_request_count: number;
+    total_review_comments: number;
+    average_comments_per_pr: number;
+    average_pr_size: number;
+    average_changed_files: number;
+    largest_pr_size: number;
+    comment_density_per_100_lines: number;
+    requested_changes_rate: number;
+    average_rework_commits_per_pr: number;
+    average_cycle_time_hours: number | null;
+    average_time_to_first_followup_hours: number | null;
+    average_time_to_merge_after_feedback_hours: number | null;
+    large_pr_rate: number;
+  };
+  breakdown: {
+    comment_categories: CommentCategoryItem[];
+    repeated_issue_categories: Array<{ category: string; count: number; pull_request_count: number }>;
+    pull_requests: DeveloperAnalyticsPullRequestItem[];
+  };
+  sample: {
+    pull_requests: number;
+    comment_text_items: number;
+    followup_samples: number;
+    resolution_samples: number;
+  };
+  summary: DeveloperAnalyticsSummary;
+}
 
 function AdvancedMetricCard({
   label,
@@ -149,112 +138,118 @@ function AdvancedMetricCard({
   );
 }
 
-export function AdvancedMetricsView({
-  pullRequests = mockAdvancedPullRequests,
-}: {
-  pullRequests?: PullRequestData[];
-}) {
-  const HIGH_COMMITS_THRESHOLD = 8;
-  const HIGH_ABANDONMENT_THRESHOLD = 20;
+function AnalyticsBullets({ title, items, tone = "slate" }: { title: string; items: string[]; tone?: "slate" | "rose" | "emerald" }) {
+  const toneClass =
+    tone === "rose"
+      ? "border-rose-900/40 bg-rose-950/20"
+      : tone === "emerald"
+        ? "border-emerald-900/40 bg-emerald-950/20"
+        : "border-slate-800 bg-slate-950/30";
 
-  const metrics = useMemo(() => {
-    const totalPrs = pullRequests.length;
-    const mergedPrs = pullRequests.filter((pr) => pr.mergedAt !== null);
-    const ghostMerges = mergedPrs.filter((pr) => pr.reviews.totalCount === 0).length;
-    const totalCommits = pullRequests.reduce((sum, pr) => sum + pr.commits.totalCount, 0);
-    const avgCommitsPerPr = totalPrs === 0 ? 0 : totalCommits / totalPrs;
-    const abandonedPrs = pullRequests.filter((pr) => pr.closedAt && !pr.mergedAt).length;
-    const abandonmentRate = totalPrs === 0 ? 0 : (abandonedPrs / totalPrs) * 100;
-
-    return {
-      ghostMerges,
-      avgCommitsPerPr,
-      abandonmentRate,
-      mergedPrs,
-      totalPrs,
-    };
-  }, [pullRequests]);
-
-  const scatterData = useMemo(
-    () =>
-      pullRequests
-        .filter((pr) => pr.createdAt && pr.mergedAt)
-        .map((pr) => {
-          const createdAt = new Date(pr.createdAt).getTime();
-          const mergedAt = new Date(pr.mergedAt ?? "").getTime();
-          const cycleTimeHours = Number.isFinite(createdAt) && Number.isFinite(mergedAt) ? (mergedAt - createdAt) / 3_600_000 : 0;
-
-          return {
-            x: pr.commits.totalCount,
-            y: cycleTimeHours,
-            title: pr.title,
-            author: pr.author.login,
-          };
-        }),
-    [pullRequests],
+  return (
+    <div className={`rounded-2xl border p-4 ${toneClass}`}>
+      <h3 className="text-sm font-medium text-slate-100">{title}</h3>
+      <ul className="mt-3 space-y-2 text-sm text-slate-300">
+        {items.map((item) => (
+          <li key={item} className="flex gap-2">
+            <span className="text-slate-500">•</span>
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
+}
 
-  const reviewCultureData = useMemo(() => {
-    const grouped = new Map<string, { author: string; zeroReviews: number; onePlusReviews: number }>();
+function DeveloperAnalyticsPanel({
+  analytics,
+  loading,
+  error,
+}: {
+  analytics: DeveloperAnalyticsResponse | null;
+  loading: boolean;
+  error: string;
+}) {
+  if (loading) {
+    return (
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 text-sm text-slate-400 shadow-xl shadow-black/20">
+        Loading developer review analytics…
+      </div>
+    );
+  }
 
-    for (const pr of pullRequests) {
-      const current = grouped.get(pr.author.login) ?? { author: pr.author.login, zeroReviews: 0, onePlusReviews: 0 };
-      if (pr.reviews.totalCount === 0) {
-        current.zeroReviews += 1;
-      } else {
-        current.onePlusReviews += 1;
-      }
-      grouped.set(pr.author.login, current);
-    }
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-900/50 bg-rose-950/20 p-6 text-sm text-rose-200 shadow-xl shadow-black/20">
+        {error}
+      </div>
+    );
+  }
 
-    return Array.from(grouped.values());
-  }, [pullRequests]);
+  if (!analytics || analytics.metrics.pull_request_count === 0) {
+    return (
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 text-sm text-slate-400 shadow-xl shadow-black/20">
+        No saved PR review data is available for this developer yet. Sync GitHub data to populate AI review analytics.
+      </div>
+    );
+  }
 
-  const ghostRate = metrics.totalPrs === 0 ? 0 : (metrics.ghostMerges / metrics.totalPrs) * 100;
-  const avgCommitsTrend: TrendDirection = metrics.avgCommitsPerPr > HIGH_COMMITS_THRESHOLD ? "up" : "down";
-  const abandonmentDirection: TrendDirection = metrics.abandonmentRate > HIGH_ABANDONMENT_THRESHOLD ? "up" : "down";
-  const ghostTrendDirection: TrendDirection = metrics.ghostMerges > 0 ? "down" : "up";
-
-  const cards: Array<{
+  const summaryCards: Array<{
     label: string;
     value: string;
     trendValue: string;
     trendDirection: TrendDirection;
   }> = [
     {
-      label: "Ghost Merges",
-      value: metrics.ghostMerges.toString(),
-      trendValue: `${ghostRate.toFixed(0)}%`,
-      trendDirection: ghostTrendDirection,
+      label: "Review Comments",
+      value: analytics.metrics.total_review_comments.toString(),
+      trendValue: `${analytics.metrics.average_comments_per_pr.toFixed(1)} / PR`,
+      trendDirection: analytics.metrics.average_comments_per_pr > 2 ? "down" : "up" as TrendDirection,
     },
     {
-      label: "Avg Commits per PR",
-      value: metrics.avgCommitsPerPr.toFixed(1),
-      trendValue: metrics.avgCommitsPerPr > HIGH_COMMITS_THRESHOLD ? "High" : "Low",
-      trendDirection: avgCommitsTrend,
+      label: "Requested Changes",
+      value: `${analytics.metrics.requested_changes_rate.toFixed(1)}%`,
+      trendValue: `${analytics.metrics.average_rework_commits_per_pr.toFixed(1)} rework`,
+      trendDirection: analytics.metrics.requested_changes_rate > 30 ? "down" : "up" as TrendDirection,
     },
     {
-      label: "PR Abandonment Rate",
-      value: `${metrics.abandonmentRate.toFixed(1)}%`,
-      trendValue: `${metrics.abandonmentRate.toFixed(0)}%`,
-      trendDirection: abandonmentDirection,
+      label: "Avg First Follow-up",
+      value:
+        analytics.metrics.average_time_to_first_followup_hours != null
+          ? `${analytics.metrics.average_time_to_first_followup_hours.toFixed(1)}h`
+          : "—",
+      trendValue: `${analytics.sample.followup_samples} samples`,
+      trendDirection:
+        analytics.metrics.average_time_to_first_followup_hours != null &&
+        analytics.metrics.average_time_to_first_followup_hours <= 12
+          ? "up"
+          : "down",
     },
   ];
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl shadow-black/20">
-      <div className="mb-6 flex items-center justify-between gap-4">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
-          <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">Advanced PR Analytics</p>
-          <h2 className="mt-2 text-2xl font-semibold text-white">Pull request quality and delivery insights</h2>
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">AI Developer Review Analytics</p>
+          <h2 className="mt-2 text-2xl font-semibold text-white">{analytics.github_username}</h2>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">{analytics.summary.overview}</p>
         </div>
-        <div className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300">
-          {metrics.totalPrs} tracked PRs
+        <div className="flex flex-wrap gap-2 text-xs text-slate-300">
+          <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
+            {analytics.sample.pull_requests} PRs analysed
+          </span>
+          <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
+            Confidence: {analytics.summary.confidence}
+          </span>
+          <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
+            Provider: {analytics.summary.provider}
+          </span>
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
-        {cards.map((card) => (
+      <div className="mt-6 grid gap-4 md:grid-cols-3">
+        {summaryCards.map((card) => (
           <AdvancedMetricCard
             key={card.label}
             label={card.label}
@@ -265,72 +260,77 @@ export function AdvancedMetricsView({
         ))}
       </div>
 
+      <div className="mt-6 grid gap-4 lg:grid-cols-4">
+        {analytics.summary.categories.map((category) => (
+          <div key={category.key} className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium text-slate-100">{category.label}</p>
+              <span className="text-lg font-semibold text-white">{category.score ?? "—"}</span>
+            </div>
+            <p className="mt-2 text-xs uppercase tracking-wide text-slate-400">{category.assessment}</p>
+            <ul className="mt-3 space-y-2 text-sm text-slate-300">
+              {category.evidence.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
           <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-slate-200">PR Complexity vs Cycle Time</h3>
-            <span className="text-xs text-slate-400">Merged PRs only</span>
+            <h3 className="text-sm font-medium text-slate-200">Review Feedback Themes</h3>
+            <span className="text-xs text-slate-400">{analytics.sample.comment_text_items} saved comment texts</span>
           </div>
           <div className="h-80 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <ScatterChart margin={{ top: 16, right: 12, bottom: 12, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis
-                  type="number"
-                  dataKey="x"
-                  name="Commits"
-                  stroke="#94a3b8"
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <YAxis
-                  type="number"
-                  dataKey="y"
-                  name="Cycle time"
-                  stroke="#94a3b8"
-                  tickLine={false}
-                  axisLine={false}
-                  tickFormatter={(value) => `${value}h`}
-                />
-                <Tooltip
-                  cursor={{ strokeDasharray: "4 4" }}
-                  content={({ active, payload }) => {
-                    if (!active || !payload || payload.length === 0) return null;
-                    const point = payload[0].payload as { title: string; author: string; x: number; y: number };
-                    return (
-                      <div className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 shadow-lg shadow-black/10">
-                        <p className="font-medium text-white">{point.title}</p>
-                        <p className="mt-1 text-slate-400">{point.author}</p>
-                        <p className="mt-1">{point.x} commits · {point.y.toFixed(1)}h</p>
-                      </div>
-                    );
-                  }}
-                />
-                <Scatter data={scatterData} fill="#8b5cf6" />
-              </ScatterChart>
-            </ResponsiveContainer>
+            {analytics.breakdown.comment_categories.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-slate-500">
+                No saved review comment text is available for thematic analysis.
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={analytics.breakdown.comment_categories} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis dataKey="category" stroke="#94a3b8" tickLine={false} axisLine={false} />
+                  <YAxis allowDecimals={false} stroke="#94a3b8" tickLine={false} axisLine={false} />
+                  <Tooltip />
+                  <Bar dataKey="count" fill="#8b5cf6" name="Comments" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
         <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
           <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-slate-200">Review Culture by Developer</h3>
-            <span className="text-xs text-slate-400">0 reviews vs 1+</span>
+            <h3 className="text-sm font-medium text-slate-200">Review Churn by PR</h3>
+            <span className="text-xs text-slate-400">Top 10 saved PRs</span>
           </div>
           <div className="h-80 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={reviewCultureData} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis dataKey="author" stroke="#94a3b8" tickLine={false} axisLine={false} />
-                <YAxis allowDecimals={false} stroke="#94a3b8" tickLine={false} axisLine={false} />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="zeroReviews" stackId="reviews" name="0 reviews" fill="#f59e0b" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="onePlusReviews" stackId="reviews" name="1+ reviews" fill="#34d399" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {analytics.breakdown.pull_requests.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-slate-500">No PR breakdown data available.</div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={analytics.breakdown.pull_requests} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis dataKey="pr_number" stroke="#94a3b8" tickLine={false} axisLine={false} />
+                  <YAxis allowDecimals={false} stroke="#94a3b8" tickLine={false} axisLine={false} />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="review_comments" fill="#22d3ee" name="Review comments" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="rework_commits" fill="#f59e0b" name="Rework commits" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
+      </div>
+
+      <div className="mt-6 grid gap-4 lg:grid-cols-3">
+        <AnalyticsBullets title="Highlights" items={analytics.summary.highlights} tone="emerald" />
+        <AnalyticsBullets title="Risks" items={analytics.summary.risks} tone="rose" />
+        <AnalyticsBullets title="Recommendations" items={analytics.summary.recommendations} />
       </div>
     </div>
   );
@@ -353,11 +353,14 @@ export default function GitAnalyticsDashboard() {
   const [teamPrsPerWeek, setTeamPrsPerWeek] = useState<PrsPerWeekItem[]>([]);
   const [indivPrsPerWeek, setIndivPrsPerWeek] = useState<PrsPerWeekItem[]>([]);
   const [indivCycleTime, setIndivCycleTime] = useState<PrCycleItem[]>([]);
+  const [developerAnalytics, setDeveloperAnalytics] = useState<DeveloperAnalyticsResponse | null>(null);
 
   const [loading, setLoading] = useState(false);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
   const [error, setError] = useState("");
+  const [analyticsError, setAnalyticsError] = useState("");
 
   const loadTeamData = useCallback(async () => {
     const [perf, cycle, prsWeek, devs] = await Promise.all([
@@ -376,13 +379,29 @@ export default function GitAnalyticsDashboard() {
   }, [selectedDeveloper]);
 
   const loadIndividualData = useCallback(async (dev: string) => {
-    if (!dev) return;
-    const [prsWeek, cycleTime] = await Promise.all([
-      apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week?developer=${encodeURIComponent(dev)}`),
-      apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
-    ]);
-    setIndivPrsPerWeek(prsWeek);
-    setIndivCycleTime(cycleTime.filter((r) => r.developer === dev));
+    if (!dev) {
+      setDeveloperAnalytics(null);
+      return;
+    }
+
+    setAnalyticsLoading(true);
+    setAnalyticsError("");
+    try {
+      const [prsWeek, cycleTime, analytics] = await Promise.all([
+        apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week?developer=${encodeURIComponent(dev)}`),
+        apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
+        apiFetch<DeveloperAnalyticsResponse>(`/api/developers/${encodeURIComponent(dev)}/analytics`),
+      ]);
+      setIndivPrsPerWeek(prsWeek);
+      setIndivCycleTime(cycleTime.filter((r) => r.developer === dev));
+      setDeveloperAnalytics(analytics);
+    } catch {
+      setDeveloperAnalytics(null);
+      setAnalyticsError("Failed to load AI developer review analytics.");
+      throw new Error("developer analytics failed");
+    } finally {
+      setAnalyticsLoading(false);
+    }
   }, []);
 
   const refreshData = useCallback(async () => {
@@ -441,12 +460,13 @@ export default function GitAnalyticsDashboard() {
     { label: "PRs Merged (30d)", value: totalPrs.toString() },
   ];
 
-  const selectedDevPerf = cycleByDev.find((r) => r.developer === selectedDeveloper);
-  const indivTotalPrs = indivPrsPerWeek.reduce((s, r) => s + r.mergedPrs, 0);
+  const selectedDevPerf = developerAnalytics?.metrics.average_cycle_time_hours != null
+    ? developerAnalytics.metrics.average_cycle_time_hours
+    : cycleByDev.find((r) => r.developer === selectedDeveloper)?.cycleTimeHours;
   const individualCards = [
     { label: "Developer", value: selectedDeveloper || "—" },
-    { label: "Avg PR Cycle Time", value: selectedDevPerf ? `${selectedDevPerf.cycleTimeHours.toFixed(1)}h` : "—" },
-    { label: "PRs Merged", value: indivTotalPrs.toString() },
+    { label: "Avg PR Cycle Time", value: selectedDevPerf != null ? `${selectedDevPerf.toFixed(1)}h` : "—" },
+    { label: "PRs Analysed", value: developerAnalytics?.metrics.pull_request_count?.toString() ?? "0" },
   ];
 
   const overviewCards = isTeamView ? teamCards : individualCards;
@@ -605,10 +625,14 @@ export default function GitAnalyticsDashboard() {
           </div>
         </div>
 
-        {/* Placeholder mock data for chart verification until live PR payload data is wired through the API. */}
-        <AdvancedMetricsView pullRequests={mockAdvancedPullRequests} />
+        {!isTeamView && (
+          <DeveloperAnalyticsPanel
+            analytics={developerAnalytics}
+            error={analyticsError}
+            loading={analyticsLoading}
+          />
+        )}
       </div>
     </div>
   );
 }
-
