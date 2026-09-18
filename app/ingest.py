@@ -80,7 +80,6 @@ def _upsert_comment(db: Session, pull_request: PullRequest, comment_data: dict) 
         )
         return
 
-    existing.pr_id = pull_request.id
     existing.comment_type = comment_data.get("comment_type", existing.comment_type)
     existing.author_login = comment_data.get("author_login", existing.author_login)
     existing.body = comment_data.get("body", existing.body)

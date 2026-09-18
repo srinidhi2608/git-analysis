@@ -9,10 +9,10 @@ from statistics import mean
 from typing import Any, Protocol
 
 import requests
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, load_only, selectinload
 
 from app.config import settings
-from app.models import Developer, PullRequest
+from app.models import Commit, Developer, PullRequest, PullRequestComment
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,12 @@ class DeveloperAnalyticsNarrator(Protocol):
 
 def _clamp(score: float, lower: int = 0, upper: int = 100) -> int:
     return max(lower, min(upper, round(score)))
+
+
+def _pluralize(count: int, singular: str, plural: str | None = None) -> str:
+    if count == 1:
+        return singular
+    return plural or f"{singular}s"
 
 
 def _round(value: float | None, digits: int = 2) -> float | None:
@@ -338,12 +344,6 @@ def _build_narrator() -> DeveloperAnalyticsNarrator:
     return HeuristicDeveloperAnalyticsNarrator()
 
 
-def _pluralize(count: int, singular: str, plural: str | None = None) -> str:
-    if count == 1:
-        return singular
-    return plural or f"{singular}s"
-
-
 def _categorize_comment(body: str) -> set[str]:
     lowered = body.lower()
     matched = {
@@ -363,20 +363,43 @@ def _hours_between(later: datetime | None, earlier: datetime | None) -> float | 
 def get_developer_review_analytics(db: Session, github_username: str) -> dict[str, Any] | None:
     developer = (
         db.query(Developer)
-        .options(
-            selectinload(Developer.pull_requests).selectinload(PullRequest.comments),
-            selectinload(Developer.pull_requests).selectinload(PullRequest.commits),
-        )
+        .options(load_only(Developer.id, Developer.github_username, Developer.team_name))
         .filter(Developer.github_username == github_username)
         .one_or_none()
     )
     if developer is None:
         return None
 
-    prs = sorted(
-        developer.pull_requests,
-        key=lambda pull_request: pull_request.created_at or datetime.min,
-        reverse=True,
+    prs = (
+        db.query(PullRequest)
+        .options(
+            load_only(
+                PullRequest.pr_number,
+                PullRequest.title,
+                PullRequest.created_at,
+                PullRequest.merged_at,
+                PullRequest.review_comments_count,
+                PullRequest.commit_count,
+                PullRequest.changed_files,
+                PullRequest.additions,
+                PullRequest.deletions,
+                PullRequest.requested_changes_count,
+                PullRequest.cycle_time_minutes,
+                PullRequest.first_review_comment_at,
+                PullRequest.last_review_comment_at,
+            ),
+            selectinload(PullRequest.comments).load_only(
+                PullRequestComment.author_login,
+                PullRequestComment.body,
+                PullRequestComment.created_at,
+            ),
+            selectinload(PullRequest.commits).load_only(
+                Commit.committed_at,
+            ),
+        )
+        .filter(PullRequest.developer_id == developer.id)
+        .order_by(PullRequest.created_at.desc())
+        .all()
     )
     total_changed_lines = 0
     total_changed_files = 0
