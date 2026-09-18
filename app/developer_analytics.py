@@ -325,6 +325,8 @@ class HttpDeveloperAnalyticsNarrator:
             .get("message", {})
             .get("content")
         )
+        if content is None:
+            raise RuntimeError("AI provider response did not include message content")
         parsed = json.loads(content)
         parsed["provider"] = self.provider_name
         return parsed
@@ -423,7 +425,11 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
                 comment_categories[category] += 1
                 category_prs[category].add(pull_request.pr_number)
 
-        commit_count = pull_request.commit_count or len(pull_request.commits)
+        commit_count = (
+            pull_request.commit_count
+            if pull_request.commit_count is not None
+            else len(pull_request.commits)
+        )
         rework_after_feedback = 0
         first_followup_at: datetime | None = None
         if first_feedback_at is not None:

@@ -11,12 +11,19 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+COLUMN_DEFINITION_PATTERN = re.compile(r"^[A-Z0-9(), ]+$")
 
 
 def _quoted_identifier(value: str) -> str:
     if not IDENTIFIER_PATTERN.fullmatch(value):
         raise ValueError(f"Unsafe SQL identifier: {value}")
     return f'"{value}"'
+
+
+def _safe_column_definition(value: str) -> str:
+    if not COLUMN_DEFINITION_PATTERN.fullmatch(value):
+        raise ValueError(f"Unsafe SQL column definition: {value}")
+    return value
 
 
 def ensure_database_schema():
@@ -49,7 +56,7 @@ def ensure_database_schema():
                 connection.execute(
                     text(
                         f"ALTER TABLE {_quoted_identifier('pull_requests')} "
-                        f"ADD COLUMN {_quoted_identifier(column_name)} {column_definition}"
+                        f"ADD COLUMN {_quoted_identifier(column_name)} {_safe_column_definition(column_definition)}"
                     )
                 )
 
@@ -58,7 +65,7 @@ def ensure_database_schema():
                 connection.execute(
                     text(
                         f"ALTER TABLE {_quoted_identifier('commits')} "
-                        f"ADD COLUMN {_quoted_identifier(column_name)} {column_definition}"
+                        f"ADD COLUMN {_quoted_identifier(column_name)} {_safe_column_definition(column_definition)}"
                     )
                 )
 

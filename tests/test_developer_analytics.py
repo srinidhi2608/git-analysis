@@ -1,12 +1,11 @@
 import os
-import tempfile
 import unittest
 from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///" + tempfile.NamedTemporaryFile(suffix=".db", delete=False).name)
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("GITHUB_TOKEN", "test-token")
 
 from app.developer_analytics import get_developer_review_analytics
