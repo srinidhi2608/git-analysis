@@ -512,7 +512,9 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
     try:
         summary = narrator.summarize(snapshot)
     except Exception:
-        logger.exception("Developer analytics narrator failed for %s; falling back.", github_username)
+        logger.exception("Developer analytics narrator failed for %s.", github_username)
+        if isinstance(narrator, HeuristicDeveloperAnalyticsNarrator):
+            raise
         summary = HeuristicDeveloperAnalyticsNarrator().summarize(snapshot)
 
     return {

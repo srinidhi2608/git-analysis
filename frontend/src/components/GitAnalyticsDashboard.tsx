@@ -398,7 +398,6 @@ export default function GitAnalyticsDashboard() {
     } catch {
       setDeveloperAnalytics(null);
       setAnalyticsError("Failed to load AI developer review analytics.");
-      throw new Error("developer analytics failed");
     } finally {
       setAnalyticsLoading(false);
     }
@@ -466,7 +465,7 @@ export default function GitAnalyticsDashboard() {
   const individualCards = [
     { label: "Developer", value: selectedDeveloper || "—" },
     { label: "Avg PR Cycle Time", value: selectedDevPerf != null ? `${selectedDevPerf.toFixed(1)}h` : "—" },
-    { label: "PRs Analysed", value: developerAnalytics?.metrics.pull_request_count?.toString() ?? "0" },
+    { label: "PRs Analyzed", value: developerAnalytics?.metrics.pull_request_count?.toString() ?? "0" },
   ];
 
   const overviewCards = isTeamView ? teamCards : individualCards;

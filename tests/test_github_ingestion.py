@@ -1,8 +1,7 @@
 import os
-import tempfile
 import unittest
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///" + tempfile.NamedTemporaryFile(suffix=".db", delete=False).name)
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("GITHUB_TOKEN", "test-token")
 
 from app.github_ingestion import GitHubIngestionService

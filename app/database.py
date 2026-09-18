@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -7,6 +9,14 @@ engine = create_engine(settings.database_url)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quoted_identifier(value: str) -> str:
+    if not IDENTIFIER_PATTERN.fullmatch(value):
+        raise ValueError(f"Unsafe SQL identifier: {value}")
+    return f'"{value}"'
 
 
 def ensure_database_schema():
@@ -38,8 +48,8 @@ def ensure_database_schema():
             if column_name not in pull_request_columns:
                 connection.execute(
                     text(
-                        f"ALTER TABLE pull_requests "
-                        f"ADD COLUMN {column_name} {column_definition}"
+                        f"ALTER TABLE {_quoted_identifier('pull_requests')} "
+                        f"ADD COLUMN {_quoted_identifier(column_name)} {column_definition}"
                     )
                 )
 
@@ -47,8 +57,8 @@ def ensure_database_schema():
             if column_name not in commit_columns:
                 connection.execute(
                     text(
-                        f"ALTER TABLE commits "
-                        f"ADD COLUMN {column_name} {column_definition}"
+                        f"ALTER TABLE {_quoted_identifier('commits')} "
+                        f"ADD COLUMN {_quoted_identifier(column_name)} {column_definition}"
                     )
                 )
 
