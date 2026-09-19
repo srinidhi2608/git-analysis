@@ -20,9 +20,8 @@ logger = logging.getLogger(__name__)
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 
-# GraphQL query: paginate closed PRs merged in the last 7 days.
-# Each page fetches up to 100 PRs; we keep fetching while hasNextPage is True.
-PR_QUERY = """
+# GraphQL query: paginate PR shells first to avoid GitHub's nested-node limit.
+PR_LIST_QUERY = """
 query($owner: String!, $repo: String!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequests(
@@ -37,55 +36,67 @@ query($owner: String!, $repo: String!, $after: String) {
       }
       nodes {
         number
-        title
-        createdAt
         mergedAt
         closedAt
-        additions
-        deletions
-        changedFiles
-        author { login }
-        reviews(first: 100) {
-          totalCount
-          nodes {
-            id
-            author { login }
-            state
-            body
-            submittedAt
-            comments(first: 100) {
-              totalCount
-              nodes {
-                id
-                body
-                createdAt
-                path
-                author { login }
-              }
-            }
-          }
-        }
-        comments(first: 100) {
-          totalCount
-          nodes {
-            id
-            body
-            createdAt
-            author { login }
-          }
-        }
-        commits(first: 100) {
-          totalCount
-          nodes {
-            commit {
-              oid
-              message
-              committedDate
-            }
-          }
-        }
-        reviewDecision
       }
+    }
+  }
+}
+"""
+
+PR_DETAILS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      number
+      title
+      createdAt
+      mergedAt
+      closedAt
+      additions
+      deletions
+      changedFiles
+      author { login }
+      reviews(first: 100) {
+        totalCount
+        nodes {
+          id
+          author { login }
+          state
+          body
+          submittedAt
+          comments(first: 100) {
+            totalCount
+            nodes {
+              id
+              body
+              createdAt
+              path
+              author { login }
+            }
+          }
+        }
+      }
+      comments(first: 100) {
+        totalCount
+        nodes {
+          id
+          body
+          createdAt
+          author { login }
+        }
+      }
+      commits(first: 100) {
+        totalCount
+        nodes {
+          commit {
+            oid
+            message
+            committedDate
+          }
+        }
+      }
+      reviewDecision
     }
   }
 }
@@ -155,7 +166,7 @@ class GitHubIngestionService:
         cursor: str | None = None
 
         while True:
-            data = self._run_query(PR_QUERY, {"owner": owner, "repo": repo, "after": cursor})
+            data = self._run_query(PR_LIST_QUERY, {"owner": owner, "repo": repo, "after": cursor})
             repository_data = data["data"]["repository"]
             if repository_data is None:
                 logger.warning("Repository %s/%s not found on GitHub; skipping.", owner, repo)
@@ -173,13 +184,29 @@ class GitHubIngestionService:
                 # Filter client-side: ordering by UPDATED_AT means we cannot stop
                 # pagination early based on mergedAt/closedAt alone.
                 if relevant_date >= since:
-                    prs.append(self._normalize_pr(owner, repo, node))
+                    detailed_node = self._fetch_pr_details(owner, repo, node["number"])
+                    if detailed_node is not None:
+                        prs.append(self._normalize_pr(owner, repo, detailed_node))
 
             if not page_info["hasNextPage"]:
                 break
             cursor = page_info["endCursor"]
 
         return prs
+
+    def _fetch_pr_details(self, owner: str, repo: str, pr_number: int) -> dict[str, Any] | None:
+        data = self._run_query(
+            PR_DETAILS_QUERY,
+            {"owner": owner, "repo": repo, "number": pr_number},
+        )
+        repository_data = data["data"]["repository"]
+        if repository_data is None:
+            logger.warning("Repository %s/%s not found while loading PR #%s.", owner, repo, pr_number)
+            return None
+        pull_request = repository_data.get("pullRequest")
+        if pull_request is None:
+            logger.warning("PR #%s not found in %s/%s.", pr_number, owner, repo)
+        return pull_request
 
     def _normalize_pr(self, owner: str, repo: str, node: dict) -> dict[str, Any]:
         """Convert a raw GraphQL PR node into a clean dict."""
