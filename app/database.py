@@ -1,6 +1,6 @@
 import re
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import DateTime, Integer, String, create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
@@ -26,6 +26,15 @@ def _safe_column_definition(value: str) -> str:
     return value
 
 
+def _compile_column_definition(column_type, *, nullable: bool = True, default: str | None = None) -> str:
+    parts = [column_type.compile(dialect=engine.dialect).upper()]
+    if not nullable:
+        parts.append("NOT NULL")
+    if default is not None:
+        parts.append(f"DEFAULT {default}")
+    return _safe_column_definition(" ".join(parts))
+
+
 def ensure_database_schema():
     Base.metadata.create_all(bind=engine)
 
@@ -34,20 +43,20 @@ def ensure_database_schema():
     commit_columns = {column["name"] for column in inspector.get_columns("commits")}
 
     pull_request_alterations = {
-        "commit_count": "INTEGER NOT NULL DEFAULT 0",
-        "changed_files": "INTEGER NOT NULL DEFAULT 0",
-        "additions": "INTEGER NOT NULL DEFAULT 0",
-        "deletions": "INTEGER NOT NULL DEFAULT 0",
-        "review_count": "INTEGER NOT NULL DEFAULT 0",
-        "reviewers_count": "INTEGER NOT NULL DEFAULT 0",
-        "approvals_count": "INTEGER NOT NULL DEFAULT 0",
-        "requested_changes_count": "INTEGER NOT NULL DEFAULT 0",
-        "review_decision": "VARCHAR(64)",
-        "first_review_comment_at": "DATETIME",
-        "last_review_comment_at": "DATETIME",
+        "commit_count": _compile_column_definition(Integer(), nullable=False, default="0"),
+        "changed_files": _compile_column_definition(Integer(), nullable=False, default="0"),
+        "additions": _compile_column_definition(Integer(), nullable=False, default="0"),
+        "deletions": _compile_column_definition(Integer(), nullable=False, default="0"),
+        "review_count": _compile_column_definition(Integer(), nullable=False, default="0"),
+        "reviewers_count": _compile_column_definition(Integer(), nullable=False, default="0"),
+        "approvals_count": _compile_column_definition(Integer(), nullable=False, default="0"),
+        "requested_changes_count": _compile_column_definition(Integer(), nullable=False, default="0"),
+        "review_decision": _compile_column_definition(String(64)),
+        "first_review_comment_at": _compile_column_definition(DateTime()),
+        "last_review_comment_at": _compile_column_definition(DateTime()),
     }
     commit_alterations = {
-        "committed_at": "DATETIME",
+        "committed_at": _compile_column_definition(DateTime()),
     }
 
     with engine.begin() as connection:

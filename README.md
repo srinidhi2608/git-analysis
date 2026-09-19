@@ -52,6 +52,31 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Backend starts at `http://localhost:8000`.  
 Database tables are created automatically on first start.
 
+### 3.1 PostgreSQL note for existing databases
+
+No manual DB step is required for a fresh setup. On startup, the app creates missing tables and adds missing columns automatically.
+
+If you are upgrading an existing PostgreSQL database, first pull the latest code and restart the backend. The schema bootstrap now uses PostgreSQL-compatible timestamp types.
+
+If startup previously failed on an older build with an error like `type "datetime" does not exist`, you normally do **not** need to change data manually; just restart with the updated code.
+
+If you prefer to patch an existing database manually before restarting, run:
+
+```sql
+ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS first_review_comment_at TIMESTAMP NULL;
+ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS last_review_comment_at TIMESTAMP NULL;
+ALTER TABLE commits ADD COLUMN IF NOT EXISTS committed_at TIMESTAMP NULL;
+```
+
+You can also verify the added columns with:
+
+```sql
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name IN ('pull_requests', 'commits')
+ORDER BY table_name, ordinal_position;
+```
+
 ## 4) Backend endpoints
 
 | Method | Path | Description |
