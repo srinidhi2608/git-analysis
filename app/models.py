@@ -41,10 +41,22 @@ class PullRequest(Base):
     merged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     cycle_time_minutes: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     review_comments_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    commit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    changed_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    additions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    deletions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    review_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reviewers_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    approvals_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    requested_changes_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    review_decision: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    first_review_comment_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_review_comment_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     repository: Mapped["Repository"] = relationship("Repository", back_populates="pull_requests")
     developer: Mapped["Developer"] = relationship("Developer", back_populates="pull_requests")
     commits: Mapped[list["Commit"]] = relationship("Commit", back_populates="pull_request")
+    comments: Mapped[list["PullRequestComment"]] = relationship("PullRequestComment", back_populates="pull_request")
 
 
 class Commit(Base):
@@ -55,6 +67,23 @@ class Commit(Base):
     developer_id: Mapped[int] = mapped_column(Integer, ForeignKey("developers.id"), nullable=False)
     commit_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
+    committed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     pull_request: Mapped["PullRequest"] = relationship("PullRequest", back_populates="commits")
     developer: Mapped["Developer"] = relationship("Developer", back_populates="commits")
+
+
+class PullRequestComment(Base):
+    __tablename__ = "pull_request_comments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    pr_id: Mapped[int] = mapped_column(Integer, ForeignKey("pull_requests.id"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    comment_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    author_login: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    review_state: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    pull_request: Mapped["PullRequest"] = relationship("PullRequest", back_populates="comments")

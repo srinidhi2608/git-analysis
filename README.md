@@ -18,6 +18,9 @@ Create `.env` in the project root directory:
 ```env
 DATABASE_URL=postgresql://<db_user>:<db_password>@localhost:5432/git_analysis
 GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+DEVELOPER_ANALYTICS_AI_URL=
+DEVELOPER_ANALYTICS_AI_TOKEN=
+DEVELOPER_ANALYTICS_AI_MODEL=
 ```
 
 Update `config.yaml` in the project root with repositories:
@@ -31,6 +34,7 @@ repositories:
 Required property values:
 - `DATABASE_URL`: valid PostgreSQL SQLAlchemy connection string
 - `GITHUB_TOKEN`: PAT with access to read repository PR data
+- `DEVELOPER_ANALYTICS_AI_URL`, `DEVELOPER_ANALYTICS_AI_TOKEN`, `DEVELOPER_ANALYTICS_AI_MODEL`: optional AI provider settings for natural-language developer review summaries. If omitted, the app falls back to an in-app heuristic summary.
 - `repositories[].name`: must be in `owner/repo` format
 - `repositories[].is_active`: `true` to include repository in active list
 
@@ -48,6 +52,31 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Backend starts at `http://localhost:8000`.  
 Database tables are created automatically on first start.
 
+### 3.1 PostgreSQL note for existing databases
+
+No manual DB step is required for a fresh setup. On startup, the app creates missing tables and adds missing columns automatically.
+
+If you are upgrading an existing PostgreSQL database, first pull the latest code and restart the backend. The schema bootstrap now uses PostgreSQL-compatible timestamp types.
+
+If startup previously failed on an older build with an error like `type "datetime" does not exist`, you normally do **not** need to change data manually; just restart with the updated code.
+
+If you prefer to patch an existing database manually before restarting, run:
+
+```sql
+ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS first_review_comment_at TIMESTAMP NULL;
+ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS last_review_comment_at TIMESTAMP NULL;
+ALTER TABLE commits ADD COLUMN IF NOT EXISTS committed_at TIMESTAMP NULL;
+```
+
+You can also verify the added columns with:
+
+```sql
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name IN ('pull_requests', 'commits')
+ORDER BY table_name, ordinal_position;
+```
+
 ## 4) Backend endpoints
 
 | Method | Path | Description |
@@ -58,6 +87,7 @@ Database tables are created automatically on first start.
 | GET | `/api/team-performance` | Team-level PR metrics (last 30 days) |
 | GET | `/api/developers` | List all known developers |
 | GET | `/api/developers/{username}` | Metrics for a specific developer |
+| GET | `/api/developers/{username}/analytics` | Saved PR review analytics + AI/heuristic summary for a developer |
 | GET | `/api/chart/pr-cycle-by-developer` | Avg cycle time per developer (for bar chart) |
 | GET | `/api/chart/prs-per-week` | PRs merged per ISO week (for line chart); accepts optional `?developer=<username>` |
 | POST | `/api/ingest` | Triggers GitHub data fetch and saves PRs to Postgres (runs in background) |
@@ -77,6 +107,11 @@ curl -X POST http://localhost:8000/api/ingest \
 ```
 
 Ingestion fetches closed/merged PRs for the selected lookback window (default: 7 days) for all active repositories and upserts them into Postgres.
+Saved pull request records now also capture:
+- PR/review comment text and timestamps
+- Review decisions / requested-changes signals
+- Changed-file and diff-size metadata
+- Commit timestamps used for review follow-up estimates
 
 ## 6) Dashboard UI setup
 
@@ -115,5 +150,5 @@ Open `http://localhost:5173` (or the URL shown in terminal).
    - Developer dropdown to select a specific GitHub user
    - KPI cards update for the selected developer
    - Charts filter to show that developer's data only
+   - AI Developer Review Analytics section shows grounded summary, review metrics, comment-theme breakdown, and PR churn insights for the selected developer
 9. Hover over chart points/bars — tooltips appear
-

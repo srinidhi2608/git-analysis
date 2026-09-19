@@ -20,9 +20,8 @@ logger = logging.getLogger(__name__)
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 
-# GraphQL query: paginate closed PRs merged in the last 7 days.
-# Each page fetches up to 100 PRs; we keep fetching while hasNextPage is True.
-PR_QUERY = """
+# GraphQL query: paginate PR shells first to avoid GitHub's nested-node limit.
+PR_LIST_QUERY = """
 query($owner: String!, $repo: String!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequests(
@@ -37,23 +36,67 @@ query($owner: String!, $repo: String!, $after: String) {
       }
       nodes {
         number
-        title
-        createdAt
         mergedAt
         closedAt
-        author { login }
-        reviews(first: 100) {
-          totalCount
-          nodes {
-            author { login }
-            state
-            comments { totalCount }
+      }
+    }
+  }
+}
+"""
+
+PR_DETAILS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      number
+      title
+      createdAt
+      mergedAt
+      closedAt
+      additions
+      deletions
+      changedFiles
+      author { login }
+      reviews(first: 100) {
+        totalCount
+        nodes {
+          id
+          author { login }
+          state
+          body
+          submittedAt
+          comments(first: 100) {
+            totalCount
+            nodes {
+              id
+              body
+              createdAt
+              path
+              author { login }
+            }
           }
         }
-        comments { totalCount }
-        commits { totalCount }
-        reviewDecision
       }
+      comments(first: 100) {
+        totalCount
+        nodes {
+          id
+          body
+          createdAt
+          author { login }
+        }
+      }
+      commits(first: 100) {
+        totalCount
+        nodes {
+          commit {
+            oid
+            message
+            committedDate
+          }
+        }
+      }
+      reviewDecision
     }
   }
 }
@@ -123,7 +166,7 @@ class GitHubIngestionService:
         cursor: str | None = None
 
         while True:
-            data = self._run_query(PR_QUERY, {"owner": owner, "repo": repo, "after": cursor})
+            data = self._run_query(PR_LIST_QUERY, {"owner": owner, "repo": repo, "after": cursor})
             repository_data = data["data"]["repository"]
             if repository_data is None:
                 logger.warning("Repository %s/%s not found on GitHub; skipping.", owner, repo)
@@ -141,7 +184,9 @@ class GitHubIngestionService:
                 # Filter client-side: ordering by UPDATED_AT means we cannot stop
                 # pagination early based on mergedAt/closedAt alone.
                 if relevant_date >= since:
-                    prs.append(self._normalize_pr(owner, repo, node))
+                    detailed_node = self._fetch_pr_details(owner, repo, node["number"])
+                    if detailed_node is not None:
+                        prs.append(self._normalize_pr(owner, repo, detailed_node))
 
             if not page_info["hasNextPage"]:
                 break
@@ -149,9 +194,25 @@ class GitHubIngestionService:
 
         return prs
 
+    def _fetch_pr_details(self, owner: str, repo: str, pr_number: int) -> dict[str, Any] | None:
+        data = self._run_query(
+            PR_DETAILS_QUERY,
+            {"owner": owner, "repo": repo, "number": pr_number},
+        )
+        repository_data = data["data"]["repository"]
+        if repository_data is None:
+            logger.warning("Repository %s/%s not found while loading PR #%s.", owner, repo, pr_number)
+            return None
+        pull_request = repository_data.get("pullRequest")
+        if pull_request is None:
+            logger.warning("PR #%s not found in %s/%s.", pr_number, owner, repo)
+        return pull_request
+
     def _normalize_pr(self, owner: str, repo: str, node: dict) -> dict[str, Any]:
         """Convert a raw GraphQL PR node into a clean dict."""
         review_nodes: list[dict] = node["reviews"]["nodes"]
+        pr_comment_nodes: list[dict] = node["comments"]["nodes"]
+        commit_nodes: list[dict] = node["commits"]["nodes"]
 
         # Unique reviewers (excluding the PR author themselves).
         author_login: str | None = (node.get("author") or {}).get("login")
@@ -164,8 +225,66 @@ class GitHubIngestionService:
             - {""}
         )
 
-        # Total review comments = sum of per-review comment counts (each review
-        # can contain multiple inline comments) plus top-level PR issue comments.
+        approvals_count = sum(1 for review in review_nodes if review.get("state") == "APPROVED")
+        requested_changes_count = sum(
+            1 for review in review_nodes if review.get("state") == "CHANGES_REQUESTED"
+        )
+
+        comments: list[dict[str, Any]] = []
+        for review in review_nodes:
+            review_author = (review.get("author") or {}).get("login")
+            review_state = review.get("state")
+            review_body = (review.get("body") or "").strip()
+            submitted_at = review.get("submittedAt")
+            review_id = review.get("id")
+            if review_body and review_id:
+                comments.append(
+                    {
+                        "external_id": f"{review_id}:review",
+                        "comment_type": "review",
+                        "author_login": review_author,
+                        "body": review_body,
+                        "created_at": submitted_at,
+                        "path": None,
+                        "review_state": review_state,
+                    }
+                )
+
+            for comment in review["comments"]["nodes"]:
+                comments.append(
+                    {
+                        "external_id": comment.get("id"),
+                        "comment_type": "review_comment",
+                        "author_login": (comment.get("author") or {}).get("login"),
+                        "body": comment.get("body") or "",
+                        "created_at": comment.get("createdAt"),
+                        "path": comment.get("path"),
+                        "review_state": review_state,
+                    }
+                )
+
+        for comment in pr_comment_nodes:
+            comments.append(
+                {
+                    "external_id": comment.get("id"),
+                    "comment_type": "pr_comment",
+                    "author_login": (comment.get("author") or {}).get("login"),
+                    "body": comment.get("body") or "",
+                    "created_at": comment.get("createdAt"),
+                    "path": None,
+                    "review_state": None,
+                }
+            )
+
+        feedback_timestamps = sorted(
+            comment["created_at"]
+            for comment in comments
+            if comment.get("created_at") and comment.get("author_login") != author_login
+        )
+
+        # Total review comments = sum of per-review inline comment counts plus
+        # top-level PR issue comments. Review bodies are stored separately for
+        # qualitative analysis but are not double-counted here.
         review_comment_count: int = (
             sum(r["comments"]["totalCount"] for r in review_nodes)
             + node["comments"]["totalCount"]
@@ -181,6 +300,26 @@ class GitHubIngestionService:
             "merged_at": node.get("mergedAt"),
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
+            "changed_files": node.get("changedFiles") or 0,
+            "additions": node.get("additions") or 0,
+            "deletions": node.get("deletions") or 0,
+            "review_count": node["reviews"]["totalCount"],
+            "reviewers_count": len(reviewer_logins),
+            "approvals_count": approvals_count,
+            "requested_changes_count": requested_changes_count,
+            "review_decision": node.get("reviewDecision"),
+            "first_review_comment_at": feedback_timestamps[0] if feedback_timestamps else None,
+            "last_review_comment_at": feedback_timestamps[-1] if feedback_timestamps else None,
+            "comments": [comment for comment in comments if comment.get("external_id")],
+            "commits": [
+                {
+                    "commit_hash": commit["commit"]["oid"],
+                    "message": commit["commit"]["message"],
+                    "committed_at": commit["commit"].get("committedDate"),
+                }
+                for commit in commit_nodes
+                if commit.get("commit") and commit["commit"].get("oid")
+            ],
         }
 
     def _run_query(self, query: str, variables: dict) -> dict[str, Any]:
