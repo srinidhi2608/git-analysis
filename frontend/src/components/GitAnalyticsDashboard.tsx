@@ -461,7 +461,7 @@ function DeveloperAnalyticsPanel({
         </div>
         <div className="flex flex-wrap gap-2 text-xs text-slate-300">
           <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
-            {analytics.sample.pull_requests} PRs analysed
+            {analytics.sample.pull_requests} PRs analyzed
           </span>
           <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
             Confidence: {analytics.summary.confidence}
@@ -814,7 +814,7 @@ export default function GitAnalyticsDashboard() {
             metrics={teamDoraMetrics?.summary ?? null}
             weeklyTrends={teamDoraMetrics?.weekly_trends ?? []}
             loading={loading}
-            error={error ? "" : doraError}
+            error={doraError}
           />
         ) : (
           <DoraMetricsPanel

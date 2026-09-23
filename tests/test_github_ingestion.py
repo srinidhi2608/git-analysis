@@ -125,7 +125,7 @@ class GitHubIngestionNormalizationTests(unittest.TestCase):
                     }
                 }
 
-            return {"data": {"repository": {"pullRequest": detail_node}}}
+            return {"data": {"repository": {"pr_0": detail_node}}}
 
         service._run_query = fake_run_query  # type: ignore[method-assign]
 
@@ -134,7 +134,7 @@ class GitHubIngestionNormalizationTests(unittest.TestCase):
         self.assertEqual(len(prs), 1)
         self.assertEqual(prs[0]["pr_number"], 42)
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1][1]["number"], 42)
+        self.assertEqual(calls[1][1]["number0"], 42)
 
 
 if __name__ == "__main__":

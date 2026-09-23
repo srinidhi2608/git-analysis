@@ -44,63 +44,59 @@ query($owner: String!, $repo: String!, $after: String) {
 }
 """
 
-PR_DETAILS_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      number
-      title
-      createdAt
-      mergedAt
-      closedAt
-      additions
-      deletions
-      changedFiles
-      author { login }
-      reviews(first: 100) {
-        totalCount
-        nodes {
-          id
-          author { login }
-          state
-          body
-          submittedAt
-          comments(first: 100) {
-            totalCount
-            nodes {
-              id
-              body
-              createdAt
-              path
-              author { login }
-            }
-          }
-        }
+PR_DETAIL_SELECTION = """
+number
+title
+createdAt
+mergedAt
+closedAt
+additions
+deletions
+changedFiles
+author { login }
+reviews(first: 100) {
+  totalCount
+  nodes {
+    id
+    author { login }
+    state
+    body
+    submittedAt
+    comments(first: 100) {
+      totalCount
+      nodes {
+        id
+        body
+        createdAt
+        path
+        author { login }
       }
-      comments(first: 100) {
-        totalCount
-        nodes {
-          id
-          body
-          createdAt
-          author { login }
-        }
-      }
-      commits(first: 100) {
-        totalCount
-        nodes {
-          commit {
-            oid
-            message
-            committedDate
-          }
-        }
-      }
-      reviewDecision
     }
   }
 }
+comments(first: 100) {
+  totalCount
+  nodes {
+    id
+    body
+    createdAt
+    author { login }
+  }
+}
+commits(first: 100) {
+  totalCount
+  nodes {
+    commit {
+      oid
+      message
+      committedDate
+    }
+  }
+}
+reviewDecision
 """
+
+DETAIL_BATCH_SIZE = 10
 
 
 class RateLimitError(Exception):
@@ -175,6 +171,7 @@ class GitHubIngestionService:
             nodes: list[dict] = pr_connection["nodes"]
             page_info: dict = pr_connection["pageInfo"]
 
+            recent_pr_numbers: list[int] = []
             for node in nodes:
                 # Use mergedAt if available, otherwise closedAt, to determine recency.
                 relevant_date_str: str | None = node.get("mergedAt") or node.get("closedAt")
@@ -184,9 +181,11 @@ class GitHubIngestionService:
                 # Filter client-side: ordering by UPDATED_AT means we cannot stop
                 # pagination early based on mergedAt/closedAt alone.
                 if relevant_date >= since:
-                    detailed_node = self._fetch_pr_details(owner, repo, node["number"])
-                    if detailed_node is not None:
-                        prs.append(self._normalize_pr(owner, repo, detailed_node))
+                    recent_pr_numbers.append(node["number"])
+
+            for pr_number_batch in self._chunked(recent_pr_numbers, DETAIL_BATCH_SIZE):
+                for detailed_node in self._fetch_pr_details_batch(owner, repo, pr_number_batch):
+                    prs.append(self._normalize_pr(owner, repo, detailed_node))
 
             if not page_info["hasNextPage"]:
                 break
@@ -194,19 +193,59 @@ class GitHubIngestionService:
 
         return prs
 
-    def _fetch_pr_details(self, owner: str, repo: str, pr_number: int) -> dict[str, Any] | None:
-        data = self._run_query(
-            PR_DETAILS_QUERY,
-            {"owner": owner, "repo": repo, "number": pr_number},
-        )
+    def _fetch_pr_details_batch(
+        self,
+        owner: str,
+        repo: str,
+        pr_numbers: list[int],
+    ) -> list[dict[str, Any]]:
+        if not pr_numbers:
+            return []
+
+        query = self._build_pr_details_batch_query(pr_numbers)
+        variables: dict[str, Any] = {"owner": owner, "repo": repo}
+        for index, pr_number in enumerate(pr_numbers):
+            variables[f"number{index}"] = pr_number
+
+        data = self._run_query(query, variables)
         repository_data = data["data"]["repository"]
         if repository_data is None:
-            logger.warning("Repository %s/%s not found while loading PR #%s.", owner, repo, pr_number)
-            return None
-        pull_request = repository_data.get("pullRequest")
-        if pull_request is None:
-            logger.warning("PR #%s not found in %s/%s.", pr_number, owner, repo)
-        return pull_request
+            logger.warning("Repository %s/%s not found while loading PR details.", owner, repo)
+            return []
+
+        detailed_prs: list[dict[str, Any]] = []
+        for index, pr_number in enumerate(pr_numbers):
+            pull_request = repository_data.get(f"pr_{index}")
+            if pull_request is None:
+                logger.warning("PR #%s not found in %s/%s.", pr_number, owner, repo)
+                continue
+            detailed_prs.append(pull_request)
+        return detailed_prs
+
+    def _build_pr_details_batch_query(self, pr_numbers: list[int]) -> str:
+        variable_definitions = ["$owner: String!", "$repo: String!"]
+        aliased_pull_requests: list[str] = []
+        for index, _ in enumerate(pr_numbers):
+            variable_name = f"number{index}"
+            variable_definitions.append(f"${variable_name}: Int!")
+            aliased_pull_requests.append(
+                f"""
+                pr_{index}: pullRequest(number: ${variable_name}) {{
+                  {PR_DETAIL_SELECTION}
+                }}
+                """
+            )
+
+        return f"""
+query({", ".join(variable_definitions)}) {{
+  repository(owner: $owner, name: $repo) {{
+    {"".join(aliased_pull_requests)}
+  }}
+}}
+"""
+
+    def _chunked(self, items: list[int], size: int) -> list[list[int]]:
+        return [items[index:index + size] for index in range(0, len(items), size)]
 
     def _normalize_pr(self, owner: str, repo: str, node: dict) -> dict[str, Any]:
         """Convert a raw GraphQL PR node into a clean dict."""

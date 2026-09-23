@@ -456,14 +456,14 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
         rework_after_feedback = 0
         first_followup_at: datetime | None = None
         if first_feedback_at is not None:
-            for commit in sorted(
+            for pr_commit in sorted(
                 [commit for commit in pull_request.commits if commit.committed_at is not None],
-                key=lambda commit: commit.committed_at or datetime.min,
+                key=lambda current_commit: current_commit.committed_at or datetime.min,
             ):
-                if commit.committed_at and commit.committed_at > first_feedback_at:
+                if pr_commit.committed_at and pr_commit.committed_at > first_feedback_at:
                     rework_after_feedback += 1
                     if first_followup_at is None:
-                        first_followup_at = commit.committed_at
+                        first_followup_at = pr_commit.committed_at
         else:
             rework_after_feedback = max(commit_count - 1, 0)
         rework_counts.append(rework_after_feedback)
