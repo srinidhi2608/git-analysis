@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal, ensure_database_schema, get_db
 from app.config_loader import load_active_repositories
 from app.developer_analytics import get_developer_review_analytics
+from app.dora_metrics import get_developer_dora_metrics, get_team_dora_metrics
 from app.queries import (
     get_developer_metrics,
     get_team_performance_metrics,
@@ -147,6 +148,42 @@ class DeveloperAnalyticsResponse(BaseModel):
     summary: DeveloperAnalyticsSummaryResponse
 
 
+class DoraSummaryResponse(BaseModel):
+    window_days: int
+    pull_request_count: int
+    merged_pull_request_count: int
+    reviewed_pull_request_count: int
+    merge_frequency_per_week: float
+    average_lead_time_hours: float | None
+    median_lead_time_hours: float | None
+    average_time_to_first_review_hours: float | None
+    review_coverage_rate: float
+    approval_rate: float
+    change_failure_proxy_rate: float
+    average_recovery_time_hours: float | None
+    recovery_samples: int
+
+
+class DoraWeeklyTrendItem(BaseModel):
+    week: str
+    merged_prs: int
+    average_lead_time_hours: float | None
+    average_time_to_first_review_hours: float | None
+    change_failure_proxy_rate: float
+
+
+class TeamDoraMetricsResponse(BaseModel):
+    summary: DoraSummaryResponse
+    weekly_trends: list[DoraWeeklyTrendItem]
+
+
+class DeveloperDoraMetricsResponse(BaseModel):
+    github_username: str
+    team_name: str | None
+    summary: DoraSummaryResponse
+    weekly_trends: list[DoraWeeklyTrendItem]
+
+
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
@@ -190,6 +227,11 @@ def team_performance(db: Session = Depends(get_db)):
     return get_team_performance_metrics(db)
 
 
+@app.get("/api/dora/team", response_model=TeamDoraMetricsResponse)
+def team_dora_metrics(db: Session = Depends(get_db)):
+    return get_team_dora_metrics(db)
+
+
 @app.get("/api/developers", response_model=list[DeveloperItem])
 def list_developers(db: Session = Depends(get_db)):
     return get_all_developers(db)
@@ -209,6 +251,14 @@ def developer_analytics(github_username: str, db: Session = Depends(get_db)):
     if analytics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return analytics
+
+
+@app.get("/api/developers/{github_username}/dora", response_model=DeveloperDoraMetricsResponse)
+def developer_dora_metrics(github_username: str, db: Session = Depends(get_db)):
+    metrics = get_developer_dora_metrics(db, github_username)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Developer not found")
+    return metrics
 
 
 @app.get("/api/chart/pr-cycle-by-developer", response_model=list[PrCycleByDeveloperItem])

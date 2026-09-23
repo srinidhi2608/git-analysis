@@ -85,9 +85,11 @@ ORDER BY table_name, ordinal_position;
 | GET | `/docs` | Swagger UI |
 | GET | `/active-repositories` | Lists active repos from `config.yaml` |
 | GET | `/api/team-performance` | Team-level PR metrics (last 30 days) |
+| GET | `/api/dora/team` | Team-level DORA-inspired GitHub delivery metrics and weekly trends |
 | GET | `/api/developers` | List all known developers |
 | GET | `/api/developers/{username}` | Metrics for a specific developer |
 | GET | `/api/developers/{username}/analytics` | Saved PR review analytics + AI/heuristic summary for a developer |
+| GET | `/api/developers/{username}/dora` | Individual DORA-inspired GitHub delivery metrics and weekly trends |
 | GET | `/api/chart/pr-cycle-by-developer` | Avg cycle time per developer (for bar chart) |
 | GET | `/api/chart/prs-per-week` | PRs merged per ISO week (for line chart); accepts optional `?developer=<username>` |
 | POST | `/api/ingest` | Triggers GitHub data fetch and saves PRs to Postgres (runs in background) |
@@ -150,5 +152,40 @@ Open `http://localhost:5173` (or the URL shown in terminal).
    - Developer dropdown to select a specific GitHub user
    - KPI cards update for the selected developer
    - Charts filter to show that developer's data only
+   - DORA-inspired GitHub delivery section shows merge frequency, lead time, review coverage, approval rate, and a change-failure proxy trend for the selected developer
    - AI Developer Review Analytics section shows grounded summary, review metrics, comment-theme breakdown, and PR churn insights for the selected developer
 9. Hover over chart points/bars — tooltips appear
+
+## 7) DORA-inspired GitHub metrics added to the dashboard
+
+The app now includes a GitHub-native interpretation of DORA software delivery ideas. Because this project currently analyzes pull requests, reviews, comments, and commits — not production deploys or incident systems — the dashboard uses **proxies** that fit GitHub data.
+
+### Team-level and individual-level metrics
+
+- **Merge Frequency**  
+  Proxy for deployment frequency. Calculated as merged PRs per week over the dashboard window.
+
+- **Average Lead Time**  
+  Proxy for lead time for changes. Calculated from PR creation to merge time.
+
+- **Median Lead Time (P50)**  
+  Median PR lead time, used to reduce outlier distortion when a few PRs stay open much longer than the rest.
+
+- **Time to First Review**  
+  Measures how long a PR waits before the first saved review feedback appears. Useful for identifying review-queue bottlenecks.
+
+- **Review Coverage Rate**  
+  Percentage of PRs that received recorded review activity or review comments.
+
+- **Approval Rate**  
+  Percentage of reviewed PRs that received at least one approval.
+
+- **Change Failure Proxy Rate**  
+  GitHub-specific quality proxy for DORA change failure rate. Calculated as the percentage of reviewed PRs that received requested changes.
+
+- **Average Recovery Time After Review Feedback**  
+  GitHub-specific recovery proxy inspired by MTTR. Calculated as the average time from the last saved review feedback to merge for PRs that had requested changes.
+
+### Important note
+
+These are **DORA-inspired engineering workflow metrics**, not exact production DORA metrics. True deployment frequency, change failure rate, and mean time to restore service require deployment and incident data that is outside the current GitHub-only dataset.
