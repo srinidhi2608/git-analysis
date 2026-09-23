@@ -591,20 +591,26 @@ export default function GitAnalyticsDashboard() {
   const [doraError, setDoraError] = useState("");
 
   const loadTeamData = useCallback(async () => {
-    const [perf, cycle, prsWeek, devs, dora] = await Promise.all([
-      apiFetch<TeamPerformance[]>("/api/team-performance"),
-      apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
-      apiFetch<PrsPerWeekItem[]>("/api/chart/prs-per-week"),
-      apiFetch<DeveloperItem[]>("/api/developers"),
-      apiFetch<TeamDoraMetricsResponse>("/api/dora/team"),
-    ]);
-    setTeamPerf(perf);
-    setCycleByDev(cycle);
-    setTeamPrsPerWeek(prsWeek);
-    setDevelopers(devs);
-    setTeamDoraMetrics(dora);
-    if (!selectedDeveloper && devs.length > 0) {
-      setSelectedDeveloper(devs[0].github_username);
+    setDoraLoading(true);
+    setDoraError("");
+    try {
+      const [perf, cycle, prsWeek, devs, dora] = await Promise.all([
+        apiFetch<TeamPerformance[]>("/api/team-performance"),
+        apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
+        apiFetch<PrsPerWeekItem[]>("/api/chart/prs-per-week"),
+        apiFetch<DeveloperItem[]>("/api/developers"),
+        apiFetch<TeamDoraMetricsResponse>("/api/dora/team"),
+      ]);
+      setTeamPerf(perf);
+      setCycleByDev(cycle);
+      setTeamPrsPerWeek(prsWeek);
+      setDevelopers(devs);
+      setTeamDoraMetrics(dora);
+      if (!selectedDeveloper && devs.length > 0) {
+        setSelectedDeveloper(devs[0].github_username);
+      }
+    } finally {
+      setDoraLoading(false);
     }
   }, [selectedDeveloper]);
 
@@ -813,7 +819,7 @@ export default function GitAnalyticsDashboard() {
             subtitle="GitHub-native proxies for DORA delivery, lead time, quality, and review flow."
             metrics={teamDoraMetrics?.summary ?? null}
             weeklyTrends={teamDoraMetrics?.weekly_trends ?? []}
-            loading={loading}
+            loading={doraLoading}
             error={doraError}
           />
         ) : (

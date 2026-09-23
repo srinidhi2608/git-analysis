@@ -181,7 +181,7 @@ The app now includes a GitHub-native interpretation of DORA software delivery id
   Percentage of reviewed PRs that received at least one approval.
 
 - **Change Failure Proxy Rate**  
-  GitHub-specific quality proxy for DORA change failure rate. Calculated as the percentage of reviewed PRs that received requested changes.
+  GitHub-specific quality proxy for DORA change failure rate. Calculated as the percentage of merged PRs in the window that received requested changes during review.
 
 - **Average Recovery Time After Review Feedback**  
   GitHub-specific recovery proxy inspired by MTTR. Calculated as the average time from the last saved review feedback to merge for PRs that had requested changes.

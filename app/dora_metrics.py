@@ -142,7 +142,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
     )
     summary["approval_rate"] = _round((approved_pr_count / reviewed_pr_count) * 100 if reviewed_pr_count else 0)
     summary["change_failure_proxy_rate"] = _round(
-        (requested_changes_pr_count / reviewed_pr_count) * 100 if reviewed_pr_count else 0
+        (requested_changes_pr_count / merged_pr_count) * 100 if merged_pr_count else 0
     )
     summary["average_recovery_time_hours"] = _round(
         sum(recovery_times) / len(recovery_times) if recovery_times else None
@@ -166,7 +166,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
                     else None
                 ),
                 "change_failure_proxy_rate": _round(
-                    (bucket["change_failure_proxy_count"] / reviewed_count) * 100 if reviewed_count else 0
+                    (bucket["change_failure_proxy_count"] / bucket["merged_prs"]) * 100 if bucket["merged_prs"] else 0
                 ),
             }
         )
