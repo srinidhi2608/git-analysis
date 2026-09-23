@@ -544,7 +544,11 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
         logger.exception("Developer analytics narrator failed for %s.", github_username)
         if isinstance(narrator, HeuristicDeveloperAnalyticsNarrator):
             raise
-        summary = HeuristicDeveloperAnalyticsNarrator().summarize(snapshot)
+        try:
+            summary = HeuristicDeveloperAnalyticsNarrator().summarize(snapshot)
+        except Exception:
+            logger.exception("Heuristic developer analytics narrator also failed for %s.", github_username)
+            raise
 
     return {
         "github_username": developer.github_username,

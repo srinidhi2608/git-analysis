@@ -35,12 +35,26 @@ def _compile_column_definition(column_type, *, nullable: bool = True, default: s
     return _safe_column_definition(" ".join(parts))
 
 
+def _apply_column_alterations(connection, table_name: str, existing_columns: set[str], alterations: dict[str, str]) -> None:
+    for column_name, column_definition in alterations.items():
+        if column_name not in existing_columns:
+            connection.execute(
+                text(
+                    f"ALTER TABLE {_quoted_identifier(table_name)} "
+                    f"ADD COLUMN {_quoted_identifier(column_name)} {_safe_column_definition(column_definition)}"
+                )
+            )
+
+
 def ensure_database_schema():
     Base.metadata.create_all(bind=engine)
 
     inspector = inspect(engine)
     pull_request_columns = {column["name"] for column in inspector.get_columns("pull_requests")}
     commit_columns = {column["name"] for column in inspector.get_columns("commits")}
+    pull_request_comment_columns = {
+        column["name"] for column in inspector.get_columns("pull_request_comments")
+    }
 
     pull_request_alterations = {
         "commit_count": _compile_column_definition(Integer(), nullable=False, default="0"),
@@ -58,25 +72,17 @@ def ensure_database_schema():
     commit_alterations = {
         "committed_at": _compile_column_definition(DateTime()),
     }
+    pull_request_comment_alterations: dict[str, str] = {}
 
     with engine.begin() as connection:
-        for column_name, column_definition in pull_request_alterations.items():
-            if column_name not in pull_request_columns:
-                connection.execute(
-                    text(
-                        f"ALTER TABLE {_quoted_identifier('pull_requests')} "
-                        f"ADD COLUMN {_quoted_identifier(column_name)} {_safe_column_definition(column_definition)}"
-                    )
-                )
-
-        for column_name, column_definition in commit_alterations.items():
-            if column_name not in commit_columns:
-                connection.execute(
-                    text(
-                        f"ALTER TABLE {_quoted_identifier('commits')} "
-                        f"ADD COLUMN {_quoted_identifier(column_name)} {_safe_column_definition(column_definition)}"
-                    )
-                )
+        _apply_column_alterations(connection, "pull_requests", pull_request_columns, pull_request_alterations)
+        _apply_column_alterations(connection, "commits", commit_columns, commit_alterations)
+        _apply_column_alterations(
+            connection,
+            "pull_request_comments",
+            pull_request_comment_columns,
+            pull_request_comment_alterations,
+        )
 
 
 def get_db():

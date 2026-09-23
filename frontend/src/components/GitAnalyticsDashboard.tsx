@@ -609,6 +609,10 @@ export default function GitAnalyticsDashboard() {
       if (!selectedDeveloper && devs.length > 0) {
         setSelectedDeveloper(devs[0].github_username);
       }
+    } catch {
+      setTeamDoraMetrics(null);
+      setDoraError("Failed to load DORA-inspired GitHub delivery metrics.");
+      throw new Error("team dora metrics failed");
     } finally {
       setDoraLoading(false);
     }

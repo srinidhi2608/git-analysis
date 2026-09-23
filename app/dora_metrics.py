@@ -60,7 +60,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
 
     reviewed_pr_count = 0
     approved_pr_count = 0
-    requested_changes_pr_count = 0
+    requested_changes_merged_pr_count = 0
     merged_pr_count = 0
 
     trend_cutoff = _utc_now_naive() - timedelta(weeks=trend_weeks)
@@ -93,8 +93,6 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
             reviewed_pr_count += 1
         if (pull_request.approvals_count or 0) > 0:
             approved_pr_count += 1
-        if (pull_request.requested_changes_count or 0) > 0:
-            requested_changes_pr_count += 1
 
         if lead_time is not None:
             lead_times.append(lead_time)
@@ -113,6 +111,8 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
             continue
 
         merged_pr_count += 1
+        if (pull_request.requested_changes_count or 0) > 0:
+            requested_changes_merged_pr_count += 1
         if pull_request.merged_at < trend_cutoff:
             continue
 
@@ -142,7 +142,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
     )
     summary["approval_rate"] = _round((approved_pr_count / reviewed_pr_count) * 100 if reviewed_pr_count else 0)
     summary["change_failure_proxy_rate"] = _round(
-        (requested_changes_pr_count / merged_pr_count) * 100 if merged_pr_count else 0
+        (requested_changes_merged_pr_count / merged_pr_count) * 100 if merged_pr_count else 0
     )
     summary["average_recovery_time_hours"] = _round(
         sum(recovery_times) / len(recovery_times) if recovery_times else None

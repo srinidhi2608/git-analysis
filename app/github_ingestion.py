@@ -244,7 +244,8 @@ query({", ".join(variable_definitions)}) {{
 }}
 """
 
-    def _chunked(self, items: list[int], size: int) -> list[list[int]]:
+    @staticmethod
+    def _chunked(items: list[int], size: int) -> list[list[int]]:
         return [items[index:index + size] for index in range(0, len(items), size)]
 
     def _normalize_pr(self, owner: str, repo: str, node: dict) -> dict[str, Any]:
