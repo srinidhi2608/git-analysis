@@ -17,6 +17,11 @@ from app.config import settings
 from app.config_loader import load_active_repositories
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 
@@ -26,7 +31,6 @@ query($owner: String!, $repo: String!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequests(
       states: [CLOSED, MERGED, OPEN]
-      orderBy: { field: UPDATED_AT, direction: DESC }
       first: 100
       after: $after
     ) {
@@ -148,6 +152,10 @@ class GitHubIngestionService:
                 continue
             logger.info("Fetching PRs for %s", repo_name)
             prs = self._fetch_repo_prs(owner, name)
+            logger.info("Fetched %d PRs for %s", len(prs), repo_name)
+            #display pr title 
+            for pr in prs:
+                logger.info("PR title: %s", pr.get("title", ""))
             results.extend(prs)
         return results
 
@@ -174,7 +182,7 @@ class GitHubIngestionService:
             recent_pr_numbers: list[int] = []
             for node in nodes:
                 # Use mergedAt if available, otherwise closedAt, to determine recency.
-                relevant_date_str: str | None = node.get("mergedAt") or node.get("closedAt")
+                relevant_date_str: str | None = node.get("mergedAt") or node.get("closedAt") or node.get("createdAt")
                 if not relevant_date_str:
                     continue
                 relevant_date = datetime.fromisoformat(relevant_date_str.replace("Z", "+00:00"))

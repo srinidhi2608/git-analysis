@@ -22,7 +22,7 @@ from app.queries import (
 from app.ingest import run_ingestion
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel(logging.INFO)
 active_repos: list = []
 
 # ---------------------------------------------------------------------------

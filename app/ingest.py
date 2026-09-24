@@ -16,7 +16,7 @@ from app.github_ingestion import GitHubIngestionService
 from app.models import Commit, Developer, PullRequest, PullRequestComment, Repository
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel(logging.INFO)
 
 def _parse_dt(value: str | None) -> datetime | None:
     if not value:
@@ -126,6 +126,7 @@ def run_ingestion(db: Session, lookback_days: int = 7) -> int:
             repo_name: str = pr_data["repository"]
             pr_number: int = pr_data["pr_number"]
             author: str | None = pr_data.get("author")
+            title: str | None = pr_data.get("title", ""),
 
             if not author:
                 logger.debug("PR #%s in %s has no author; skipping.", pr_number, repo_name)
