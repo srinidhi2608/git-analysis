@@ -137,7 +137,7 @@ class OnlineAIHandler(BaseMetricsAnalyzer):
             response = await client.post(
                 f"{base_url}/chat/completions",
                 headers={
-                    "Authorization": f"******",
+                    "Authorization": "Bearer " + (settings.online_ai_api_key or ""),
                     "Content-Type": "application/json",
                 },
                 json=payload,
