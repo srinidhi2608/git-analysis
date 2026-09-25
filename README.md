@@ -65,7 +65,7 @@ Required property values:
 | `LARGE_PR_THRESHOLD_LINES` | `600` | Lines-changed above which a PR is flagged as large |
 | `FOLLOWUP_GOOD_THRESHOLD_HOURS` | `12` | Hours within which a review follow-up comment is considered prompt |
 | `REQUESTED_CHANGES_RISKY_PCT` | `30` | % of PRs with requested changes above which a developer is flagged |
-| `HIGH_COMMENTS_PER_PR_THRESHOLD` | `2` | Avg review comments per PR above which trend indicator is positive |
+| `HIGH_COMMENTS_PER_PR_THRESHOLD` | `2` | Avg review comments per PR above which the trend indicator turns negative (flag for over-review or noise) |
 | `LEAD_TIME_HEALTHY_HOURS` | `48` | Max avg PR lead time (h) for a "healthy" DORA score |
 | `FIRST_REVIEW_HEALTHY_HOURS` | `24` | Max avg time-to-first-review (h) for a "healthy" indicator |
 | `REVIEW_COVERAGE_GOOD_PCT` | `80` | Min % of PRs reviewed for a "good" coverage indicator |
@@ -73,6 +73,8 @@ Required property values:
 | `CHANGE_FAILURE_ACCEPTABLE_PCT` | `35` | Max % of PRs with requested changes for acceptable change-failure proxy |
 | `CONFIDENCE_MIN_PRS` | `5` | Minimum PRs required for medium confidence in analytics |
 | `CONFIDENCE_MIN_COMMENTS` | `8` | Minimum review comments required for medium confidence |
+| `CONFIDENCE_HIGH_PRS` | `8` | Minimum PRs required for high confidence in analytics |
+| `CONFIDENCE_HIGH_COMMENTS` | `15` | Minimum review comments required for high confidence |
 
 ### 2.1 Configuring local Ollama (Tier 2 AI)
 
@@ -118,7 +120,7 @@ Verify it is reachable:
 curl http://localhost:11434/api/tags
 ```
 
-The backend probes this endpoint at startup and automatically falls back to the heuristic engine if Ollama is unreachable.
+The backend probes this endpoint on each analytics request and automatically falls back to the heuristic engine if Ollama is unreachable.
 
 **3-tier fallback summary**
 

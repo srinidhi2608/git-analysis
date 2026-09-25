@@ -167,7 +167,7 @@ class HeuristicDeveloperAnalyticsNarrator:
         confidence = "low"
         if prs >= settings.confidence_min_prs and comment_text_items >= settings.confidence_min_comments:
             confidence = "medium"
-        if prs >= settings.confidence_min_prs * 2 - 2 and comment_text_items >= settings.confidence_min_comments * 2 - 1 and avg_followup is not None:
+        if prs >= settings.confidence_high_prs and comment_text_items >= settings.confidence_high_comments and avg_followup is not None:
             confidence = "high"
 
         overview_lead = (

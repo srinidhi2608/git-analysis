@@ -37,10 +37,12 @@ class Settings(BaseSettings):
     approval_rate_good_pct: float = Field(default=60.0, env="APPROVAL_RATE_GOOD_PCT")
     # Change failure proxy rate (%) below which is considered acceptable.
     change_failure_acceptable_pct: float = Field(default=35.0, env="CHANGE_FAILURE_ACCEPTABLE_PCT")
-    # Minimum PRs to raise analytics confidence from "low" to "medium".
+    # Minimum PRs/comments to raise analytics confidence from "low" to "medium".
     confidence_min_prs: int = Field(default=5, env="CONFIDENCE_MIN_PRS")
-    # Minimum saved review comment texts to raise confidence.
     confidence_min_comments: int = Field(default=8, env="CONFIDENCE_MIN_COMMENTS")
+    # Minimum PRs/comments to raise analytics confidence from "medium" to "high".
+    confidence_high_prs: int = Field(default=8, env="CONFIDENCE_HIGH_PRS")
+    confidence_high_comments: int = Field(default=15, env="CONFIDENCE_HIGH_COMMENTS")
 
     class Config:
         env_file = ".env"
