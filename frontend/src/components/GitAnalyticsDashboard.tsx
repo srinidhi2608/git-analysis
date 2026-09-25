@@ -14,8 +14,21 @@ import {
 } from "recharts";
 
 type TabKey = "team" | "individual";
+type IndivTabKey = "summary" | "dora" | "ai_metrics" | "reviewers";
 
 type TrendDirection = "up" | "down";
+
+interface Thresholds {
+  large_pr_threshold_lines: number;
+  followup_good_threshold_hours: number;
+  requested_changes_risky_pct: number;
+  high_comments_per_pr_threshold: number;
+  lead_time_healthy_hours: number;
+  first_review_healthy_hours: number;
+  review_coverage_good_pct: number;
+  approval_rate_good_pct: number;
+  change_failure_acceptable_pct: number;
+}
 
 interface CommentCategoryItem {
   category: string;
@@ -105,11 +118,23 @@ interface DeveloperAnalyticsSummary {
   highlights: string[];
   risks: string[];
   recommendations: string[];
+  strengths: string[];
+  improvement_areas: string[];
+  coding_standards_score: number | null;
+  design_patterns_summary: string;
+  dry_vs_wet_observations: string;
+  reviewer_rigor_score: number | null;
+}
+
+interface ReviewerItem {
+  login: string;
+  comment_count: number;
 }
 
 interface DeveloperAnalyticsResponse {
   github_username: string;
   team_name: string | null;
+  languages: string[];
   metrics: {
     pull_request_count: number;
     merged_pull_request_count: number;
@@ -130,6 +155,7 @@ interface DeveloperAnalyticsResponse {
     comment_categories: CommentCategoryItem[];
     repeated_issue_categories: Array<{ category: string; count: number; pull_request_count: number }>;
     pull_requests: DeveloperAnalyticsPullRequestItem[];
+    reviewers: ReviewerItem[];
   };
   sample: {
     pull_requests: number;
@@ -173,13 +199,15 @@ function AdvancedMetricCard({
   );
 }
 
-function AnalyticsBullets({ title, items, tone = "slate" }: { title: string; items: string[]; tone?: "slate" | "rose" | "emerald" }) {
+function AnalyticsBullets({ title, items, tone = "slate" }: { title: string; items: string[]; tone?: "slate" | "rose" | "emerald" | "amber" }) {
   const toneClass =
     tone === "rose"
       ? "border-rose-900/40 bg-rose-950/20"
       : tone === "emerald"
         ? "border-emerald-900/40 bg-emerald-950/20"
-        : "border-slate-800 bg-slate-950/30";
+        : tone === "amber"
+          ? "border-amber-900/40 bg-amber-950/20"
+          : "border-slate-800 bg-slate-950/30";
 
   return (
     <div className={`rounded-2xl border p-4 ${toneClass}`}>
@@ -385,180 +413,449 @@ function DoraMetricsPanel({
   );
 }
 
-function DeveloperAnalyticsPanel({
+function IndividualPerformancePanel({
   analytics,
   loading,
   error,
+  doraMetrics,
+  doraWeeklyTrends,
+  doraLoading,
+  doraError,
+  thresholds,
 }: {
   analytics: DeveloperAnalyticsResponse | null;
   loading: boolean;
   error: string;
+  doraMetrics: DoraSummary | null;
+  doraWeeklyTrends: DoraWeeklyTrendItem[];
+  doraLoading: boolean;
+  doraError: string;
+  thresholds: Thresholds;
 }) {
-  if (loading) {
+  const [activeTab, setActiveTab] = useState<IndivTabKey>("summary");
+
+  const isLoading = loading || doraLoading;
+  const hasError = error || doraError;
+
+  if (isLoading && !analytics && !doraMetrics) {
     return (
       <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 text-sm text-slate-400 shadow-xl shadow-black/20">
-        Loading developer review analytics…
+        Loading individual performance data…
       </div>
     );
   }
 
-  if (error) {
+  if (hasError && !analytics && !doraMetrics) {
     return (
       <div className="rounded-2xl border border-rose-900/50 bg-rose-950/20 p-6 text-sm text-rose-200 shadow-xl shadow-black/20">
-        {error}
+        {error || doraError}
       </div>
     );
   }
 
-  if (!analytics || analytics.metrics.pull_request_count === 0) {
+  if (!analytics && !doraMetrics) {
     return (
       <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 text-sm text-slate-400 shadow-xl shadow-black/20">
-        No saved PR review data is available for this developer yet. Sync GitHub data to populate AI review analytics.
+        No saved PR data is available yet. Sync GitHub data to populate analytics.
       </div>
     );
   }
 
-  const summaryCards: Array<{
-    label: string;
-    value: string;
-    trendValue: string;
-    trendDirection: TrendDirection;
-  }> = [
-    {
-      label: "Review Comments",
-      value: analytics.metrics.total_review_comments.toString(),
-      trendValue: `${analytics.metrics.average_comments_per_pr.toFixed(1)} / PR`,
-      trendDirection: analytics.metrics.average_comments_per_pr > 2 ? "down" : "up" as TrendDirection,
-    },
-    {
-      label: "Requested Changes",
-      value: `${analytics.metrics.requested_changes_rate.toFixed(1)}%`,
-      trendValue: `${analytics.metrics.average_rework_commits_per_pr.toFixed(1)} rework`,
-      trendDirection: analytics.metrics.requested_changes_rate > 30 ? "down" : "up" as TrendDirection,
-    },
-    {
-      label: "Avg First Follow-up",
-      value:
-        analytics.metrics.average_time_to_first_followup_hours != null
-          ? `${analytics.metrics.average_time_to_first_followup_hours.toFixed(1)}h`
-          : "—",
-      trendValue: `${analytics.sample.followup_samples} samples`,
-      trendDirection:
-        analytics.metrics.average_time_to_first_followup_hours != null &&
-        analytics.metrics.average_time_to_first_followup_hours <= 12
-          ? "up"
-          : "down",
-    },
+  const tabs: Array<{ key: IndivTabKey; label: string }> = [
+    { key: "summary", label: "Summary" },
+    { key: "dora", label: "DORA Metrics" },
+    { key: "ai_metrics", label: "AI Metrics" },
+    { key: "reviewers", label: "Reviewers" },
   ];
 
+  const reviewerCount = analytics?.breakdown?.reviewers?.length ?? 0;
+  const languageTags = analytics?.languages ?? [];
+
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl shadow-black/20">
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">AI Developer Review Analytics</p>
-          <h2 className="mt-2 text-2xl font-semibold text-white">{analytics.github_username}</h2>
-          <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">{analytics.summary.overview}</p>
-        </div>
-        <div className="flex flex-wrap gap-2 text-xs text-slate-300">
-          <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
-            {analytics.sample.pull_requests} PRs analyzed
-          </span>
-          <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
-            Confidence: {analytics.summary.confidence}
-          </span>
-          <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
-            Provider: {analytics.summary.provider}
-          </span>
-        </div>
-      </div>
-
-      <div className="mt-6 grid gap-4 md:grid-cols-3">
-        {summaryCards.map((card) => (
-          <AdvancedMetricCard
-            key={card.label}
-            label={card.label}
-            value={card.value}
-            trendValue={card.trendValue}
-            trendDirection={card.trendDirection}
-          />
-        ))}
-      </div>
-
-      <div className="mt-6 grid gap-4 lg:grid-cols-4">
-        {analytics.summary.categories.map((category) => (
-          <div key={category.key} className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium text-slate-100">{category.label}</p>
-              <span className="text-lg font-semibold text-white">{category.score ?? "—"}</span>
-            </div>
-            <p className="mt-2 text-xs uppercase tracking-wide text-slate-400">{category.assessment}</p>
-            <ul className="mt-3 space-y-2 text-sm text-slate-300">
-              {category.evidence.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/70 shadow-xl shadow-black/20">
+      {/* Panel header */}
+      <div className="border-b border-slate-800 p-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">Individual Performance</p>
+            <h2 className="mt-2 text-2xl font-semibold text-white">{analytics?.github_username ?? "Developer"}</h2>
+            {analytics && (
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">{analytics.summary.overview}</p>
+            )}
           </div>
-        ))}
-      </div>
-
-      <div className="mt-6 grid gap-6 lg:grid-cols-2">
-        <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-slate-200">Review Feedback Themes</h3>
-            <span className="text-xs text-slate-400">{analytics.sample.comment_text_items} saved comment texts</span>
-          </div>
-          <div className="h-80 w-full">
-            {analytics.breakdown.comment_categories.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-sm text-slate-500">
-                No saved review comment text is available for thematic analysis.
+          <div className="flex flex-col items-end gap-2">
+            {analytics && (
+              <div className="flex flex-wrap justify-end gap-2 text-xs text-slate-300">
+                <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
+                  {analytics.sample.pull_requests} PRs analyzed
+                </span>
+                <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
+                  Confidence: {analytics.summary.confidence}
+                </span>
+                <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
+                  Provider: {analytics.summary.provider}
+                </span>
               </div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={analytics.breakdown.comment_categories} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="category" stroke="#94a3b8" tickLine={false} axisLine={false} />
-                  <YAxis allowDecimals={false} stroke="#94a3b8" tickLine={false} axisLine={false} />
-                  <Tooltip />
-                  <Bar dataKey="count" fill="#8b5cf6" name="Comments" radius={[6, 6, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+            )}
+            {languageTags.length > 0 && (
+              <div className="flex flex-wrap justify-end gap-1.5">
+                {languageTags.map((lang) => (
+                  <span
+                    key={lang}
+                    className="rounded-full border border-indigo-700/60 bg-indigo-900/30 px-2.5 py-0.5 text-xs font-medium text-indigo-300"
+                  >
+                    {lang}
+                  </span>
+                ))}
+              </div>
             )}
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-slate-200">Review Churn by PR</h3>
-            <span className="text-xs text-slate-400">Top 10 saved PRs</span>
-          </div>
-          <div className="h-80 w-full">
-            {analytics.breakdown.pull_requests.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-sm text-slate-500">No PR breakdown data available.</div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={analytics.breakdown.pull_requests} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="pr_number" stroke="#94a3b8" tickLine={false} axisLine={false} />
-                  <YAxis allowDecimals={false} stroke="#94a3b8" tickLine={false} axisLine={false} />
-                  <Tooltip />
-                  <Legend />
-                  <Bar dataKey="review_comments" fill="#22d3ee" name="Review comments" radius={[6, 6, 0, 0]} />
-                  <Bar dataKey="rework_commits" fill="#f59e0b" name="Rework commits" radius={[6, 6, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </div>
+        {/* Inner tab bar */}
+        <div className="mt-5 flex gap-1 overflow-x-auto">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition ${
+                activeTab === tab.key
+                  ? "bg-indigo-600 text-white"
+                  : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+              }`}
+            >
+              {tab.label}
+              {tab.key === "reviewers" && reviewerCount > 0 && (
+                <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-xs">
+                  {reviewerCount}
+                </span>
+              )}
+            </button>
+          ))}
         </div>
       </div>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-3">
-        <AnalyticsBullets title="Highlights" items={analytics.summary.highlights} tone="emerald" />
-        <AnalyticsBullets title="Risks" items={analytics.summary.risks} tone="rose" />
-        <AnalyticsBullets title="Recommendations" items={analytics.summary.recommendations} />
+      <div className="p-6">
+        {/* ── Summary tab ─────────────────────────────────────────── */}
+        {activeTab === "summary" && analytics && (
+          <div className="space-y-6">
+            <div className="grid gap-4 md:grid-cols-3">
+              {[
+                {
+                  label: "Review Comments",
+                  value: analytics.metrics.total_review_comments.toString(),
+                  trendValue: `${analytics.metrics.average_comments_per_pr.toFixed(1)} / PR`,
+                  trendDirection: (analytics.metrics.average_comments_per_pr > thresholds.high_comments_per_pr_threshold ? "down" : "up") as TrendDirection,
+                },
+                {
+                  label: "Requested Changes",
+                  value: `${analytics.metrics.requested_changes_rate.toFixed(1)}%`,
+                  trendValue: `${analytics.metrics.average_rework_commits_per_pr.toFixed(1)} rework`,
+                  trendDirection: (analytics.metrics.requested_changes_rate > thresholds.requested_changes_risky_pct ? "down" : "up") as TrendDirection,
+                },
+                {
+                  label: "Avg First Follow-up",
+                  value: analytics.metrics.average_time_to_first_followup_hours != null
+                    ? `${analytics.metrics.average_time_to_first_followup_hours.toFixed(1)}h`
+                    : "—",
+                  trendValue: `${analytics.sample.followup_samples} samples`,
+                  trendDirection: (analytics.metrics.average_time_to_first_followup_hours != null &&
+                    analytics.metrics.average_time_to_first_followup_hours <= thresholds.followup_good_threshold_hours
+                    ? "up" : "down") as TrendDirection,
+                },
+              ].map((card) => (
+                <AdvancedMetricCard key={card.label} {...card} />
+              ))}
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-4">
+              {analytics.summary.categories.map((category) => (
+                <div key={category.key} className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium text-slate-100">{category.label}</p>
+                    <span className="text-lg font-semibold text-white">{category.score ?? "—"}</span>
+                  </div>
+                  <p className="mt-2 text-xs uppercase tracking-wide text-slate-400">{category.assessment}</p>
+                  <ul className="mt-3 space-y-2 text-sm text-slate-300">
+                    {category.evidence.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-3">
+              <AnalyticsBullets title="Highlights" items={analytics.summary.highlights} tone="emerald" />
+              <AnalyticsBullets title="Risks" items={analytics.summary.risks} tone="rose" />
+              <AnalyticsBullets title="Recommendations" items={analytics.summary.recommendations} />
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <AnalyticsBullets
+                title="Strengths"
+                items={analytics.summary.strengths?.length ? analytics.summary.strengths : ["Insufficient data to identify specific strengths yet."]}
+                tone="emerald"
+              />
+              <AnalyticsBullets
+                title="Improvement Areas"
+                items={analytics.summary.improvement_areas?.length ? analytics.summary.improvement_areas : ["No specific improvement areas identified."]}
+                tone="amber"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ── DORA Metrics tab ────────────────────────────────────── */}
+        {activeTab === "dora" && (
+          <div className="space-y-6">
+            {doraLoading && (
+              <div className="text-sm text-slate-400">Loading DORA metrics…</div>
+            )}
+            {doraError && !doraMetrics && (
+              <div className="rounded-xl border border-rose-900/50 bg-rose-950/20 p-4 text-sm text-rose-200">{doraError}</div>
+            )}
+            {doraMetrics && doraMetrics.pull_request_count > 0 && (
+              <>
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {[
+                    {
+                      label: "Merge Frequency",
+                      value: `${doraMetrics.merge_frequency_per_week.toFixed(1)}/wk`,
+                      trendValue: `${doraMetrics.merged_pull_request_count} merged`,
+                      trendDirection: (doraMetrics.merge_frequency_per_week >= 1 ? "up" : "down") as TrendDirection,
+                    },
+                    {
+                      label: "Avg Lead Time",
+                      value: doraMetrics.average_lead_time_hours != null ? `${doraMetrics.average_lead_time_hours.toFixed(1)}h` : "—",
+                      trendValue: doraMetrics.median_lead_time_hours != null ? `P50 ${doraMetrics.median_lead_time_hours.toFixed(1)}h` : "No median",
+                      trendDirection: (doraMetrics.average_lead_time_hours != null && doraMetrics.average_lead_time_hours <= thresholds.lead_time_healthy_hours ? "up" : "down") as TrendDirection,
+                    },
+                    {
+                      label: "First Review Time",
+                      value: doraMetrics.average_time_to_first_review_hours != null ? `${doraMetrics.average_time_to_first_review_hours.toFixed(1)}h` : "—",
+                      trendValue: `${doraMetrics.reviewed_pull_request_count} reviewed`,
+                      trendDirection: (doraMetrics.average_time_to_first_review_hours != null && doraMetrics.average_time_to_first_review_hours <= thresholds.first_review_healthy_hours ? "up" : "down") as TrendDirection,
+                    },
+                    {
+                      label: "Review Coverage",
+                      value: `${doraMetrics.review_coverage_rate.toFixed(1)}%`,
+                      trendValue: `${doraMetrics.pull_request_count} PRs`,
+                      trendDirection: (doraMetrics.review_coverage_rate >= thresholds.review_coverage_good_pct ? "up" : "down") as TrendDirection,
+                    },
+                    {
+                      label: "Approval Rate",
+                      value: `${doraMetrics.approval_rate.toFixed(1)}%`,
+                      trendValue: `${doraMetrics.reviewed_pull_request_count} reviewed`,
+                      trendDirection: (doraMetrics.approval_rate >= thresholds.approval_rate_good_pct ? "up" : "down") as TrendDirection,
+                    },
+                    {
+                      label: "Change Failure Proxy",
+                      value: `${doraMetrics.change_failure_proxy_rate.toFixed(1)}%`,
+                      trendValue: doraMetrics.average_recovery_time_hours != null
+                        ? `Recovery ${doraMetrics.average_recovery_time_hours.toFixed(1)}h`
+                        : `${doraMetrics.recovery_samples} samples`,
+                      trendDirection: (doraMetrics.change_failure_proxy_rate <= thresholds.change_failure_acceptable_pct ? "up" : "down") as TrendDirection,
+                    },
+                  ].map((card) => (
+                    <AdvancedMetricCard key={card.label} {...card} />
+                  ))}
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
+                    <div className="mb-4 flex items-center justify-between">
+                      <h3 className="text-sm font-medium text-slate-200">Weekly Delivery Trend</h3>
+                      <span className="text-xs text-slate-400">Merged PRs + lead time</span>
+                    </div>
+                    <div className="h-80 w-full">
+                      {doraWeeklyTrends.length === 0 ? (
+                        <div className="flex h-full items-center justify-center text-sm text-slate-500">No weekly trend data available.</div>
+                      ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <ComposedChart data={doraWeeklyTrends}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                            <XAxis dataKey="week" stroke="#94a3b8" />
+                            <YAxis yAxisId="left" stroke="#94a3b8" />
+                            <YAxis yAxisId="right" orientation="right" stroke="#94a3b8" />
+                            <Tooltip />
+                            <Legend />
+                            <Bar yAxisId="left" dataKey="merged_prs" fill="#22c55e" name="Merged PRs" radius={[6, 6, 0, 0]} />
+                            <Line yAxisId="right" type="monotone" dataKey="average_lead_time_hours" stroke="#38bdf8" strokeWidth={3} name="Avg lead time (hrs)" />
+                          </ComposedChart>
+                        </ResponsiveContainer>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
+                    <div className="mb-4 flex items-center justify-between">
+                      <h3 className="text-sm font-medium text-slate-200">Weekly Review Friction</h3>
+                      <span className="text-xs text-slate-400">Review response + failure proxy</span>
+                    </div>
+                    <div className="h-80 w-full">
+                      {doraWeeklyTrends.length === 0 ? (
+                        <div className="flex h-full items-center justify-center text-sm text-slate-500">No weekly friction data available.</div>
+                      ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={doraWeeklyTrends}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                            <XAxis dataKey="week" stroke="#94a3b8" />
+                            <YAxis yAxisId="left" stroke="#94a3b8" />
+                            <YAxis yAxisId="right" orientation="right" stroke="#94a3b8" />
+                            <Tooltip />
+                            <Legend />
+                            <Line yAxisId="left" type="monotone" dataKey="average_time_to_first_review_hours" stroke="#f59e0b" strokeWidth={3} name="First review time (hrs)" />
+                            <Line yAxisId="right" type="monotone" dataKey="change_failure_proxy_rate" stroke="#f43f5e" strokeWidth={3} name="Change failure proxy (%)" />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+            {(!doraMetrics || doraMetrics.pull_request_count === 0) && !doraLoading && (
+              <div className="text-sm text-slate-500">No DORA metric data available yet.</div>
+            )}
+          </div>
+        )}
+
+        {/* ── AI Metrics tab ──────────────────────────────────────── */}
+        {activeTab === "ai_metrics" && analytics && (
+          <div className="space-y-6">
+            {(analytics.summary.coding_standards_score != null || analytics.summary.reviewer_rigor_score != null) && (
+              <div className="grid gap-4 md:grid-cols-2">
+                {analytics.summary.coding_standards_score != null && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                    <p className="mb-1 text-xs font-medium uppercase tracking-[0.14em] text-slate-400">Coding Standards Score</p>
+                    <p className="text-3xl font-bold text-white">{analytics.summary.coding_standards_score}<span className="ml-1 text-base font-normal text-slate-400">/10</span></p>
+                  </div>
+                )}
+                {analytics.summary.reviewer_rigor_score != null && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                    <p className="mb-1 text-xs font-medium uppercase tracking-[0.14em] text-slate-400">Reviewer Rigor Score</p>
+                    <p className="text-3xl font-bold text-white">{analytics.summary.reviewer_rigor_score}<span className="ml-1 text-base font-normal text-slate-400">/10</span></p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(analytics.summary.design_patterns_summary || analytics.summary.dry_vs_wet_observations) && (
+              <div className="grid gap-4 lg:grid-cols-2">
+                {analytics.summary.design_patterns_summary && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                    <p className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-slate-400">Design Patterns</p>
+                    <p className="text-sm text-slate-300">{analytics.summary.design_patterns_summary}</p>
+                  </div>
+                )}
+                {analytics.summary.dry_vs_wet_observations && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                    <p className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-slate-400">DRY vs WET Observations</p>
+                    <p className="text-sm text-slate-300">{analytics.summary.dry_vs_wet_observations}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
+                <div className="mb-4 flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-slate-200">Review Feedback Themes</h3>
+                  <span className="text-xs text-slate-400">{analytics.sample.comment_text_items} saved comment texts</span>
+                </div>
+                <div className="h-80 w-full">
+                  {analytics.breakdown.comment_categories.length === 0 ? (
+                    <div className="flex h-full items-center justify-center text-sm text-slate-500">
+                      No saved review comment text is available for thematic analysis.
+                    </div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={analytics.breakdown.comment_categories} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                        <XAxis dataKey="category" stroke="#94a3b8" tickLine={false} axisLine={false} />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" tickLine={false} axisLine={false} />
+                        <Tooltip />
+                        <Bar dataKey="count" fill="#8b5cf6" name="Comments" radius={[6, 6, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
+                <div className="mb-4 flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-slate-200">Review Churn by PR</h3>
+                  <span className="text-xs text-slate-400">Top 10 saved PRs</span>
+                </div>
+                <div className="h-80 w-full">
+                  {analytics.breakdown.pull_requests.length === 0 ? (
+                    <div className="flex h-full items-center justify-center text-sm text-slate-500">No PR breakdown data available.</div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={analytics.breakdown.pull_requests} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                        <XAxis dataKey="pr_number" stroke="#94a3b8" tickLine={false} axisLine={false} />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" tickLine={false} axisLine={false} />
+                        <Tooltip />
+                        <Legend />
+                        <Bar dataKey="review_comments" fill="#22d3ee" name="Review comments" radius={[6, 6, 0, 0]} />
+                        <Bar dataKey="rework_commits" fill="#f59e0b" name="Rework commits" radius={[6, 6, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Reviewers tab ───────────────────────────────────────── */}
+        {activeTab === "reviewers" && analytics && (
+          <div>
+            {analytics.breakdown.reviewers?.length === 0 ? (
+              <div className="text-sm text-slate-500">No reviewer data available yet.</div>
+            ) : (
+              <>
+                <p className="mb-4 text-xs text-slate-400">Ranked by total comments left on this developer's pull requests.</p>
+                <ol className="space-y-2">
+                  {analytics.breakdown.reviewers.map((reviewer, idx) => (
+                    <li key={reviewer.login} className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-sm">
+                      <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                        idx === 0 ? "bg-amber-500 text-black" :
+                        idx === 1 ? "bg-slate-400 text-black" :
+                        idx === 2 ? "bg-orange-700 text-white" :
+                        "bg-slate-800 text-slate-300"
+                      }`}>
+                        {idx + 1}
+                      </span>
+                      <span className="flex-1 font-medium text-slate-200">{reviewer.login}</span>
+                      <span className="rounded-full border border-slate-700 bg-slate-800 px-2.5 py-0.5 text-xs text-slate-300">
+                        {reviewer.comment_count} {reviewer.comment_count === 1 ? "comment" : "comments"}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              </>
+            )}
+          </div>
+        )}
+
+        {activeTab === "ai_metrics" && !analytics && (
+          <div className="text-sm text-slate-500">No AI metrics data available yet.</div>
+        )}
+        {activeTab === "summary" && !analytics && (
+          <div className="text-sm text-slate-500">No summary data available yet.</div>
+        )}
+        {activeTab === "reviewers" && !analytics && (
+          <div className="text-sm text-slate-500">No reviewer data available yet.</div>
+        )}
       </div>
     </div>
   );
 }
+
 
 async function apiFetch<T>(path: string): Promise<T> {
   const res = await fetch(path);
@@ -580,6 +877,17 @@ export default function GitAnalyticsDashboard() {
   const [developerAnalytics, setDeveloperAnalytics] = useState<DeveloperAnalyticsResponse | null>(null);
   const [teamDoraMetrics, setTeamDoraMetrics] = useState<TeamDoraMetricsResponse | null>(null);
   const [developerDoraMetrics, setDeveloperDoraMetrics] = useState<DeveloperDoraMetricsResponse | null>(null);
+  const [thresholds, setThresholds] = useState<Thresholds>({
+    large_pr_threshold_lines: 600,
+    followup_good_threshold_hours: 12,
+    requested_changes_risky_pct: 30,
+    high_comments_per_pr_threshold: 2,
+    lead_time_healthy_hours: 48,
+    first_review_healthy_hours: 24,
+    review_coverage_good_pct: 80,
+    approval_rate_good_pct: 60,
+    change_failure_acceptable_pct: 35,
+  });
 
   const [loading, setLoading] = useState(false);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
@@ -594,18 +902,20 @@ export default function GitAnalyticsDashboard() {
     setDoraLoading(true);
     setDoraError("");
     try {
-      const [perf, cycle, prsWeek, devs, dora] = await Promise.all([
+      const [perf, cycle, prsWeek, devs, dora, thresh] = await Promise.all([
         apiFetch<TeamPerformance[]>("/api/team-performance"),
         apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
         apiFetch<PrsPerWeekItem[]>("/api/chart/prs-per-week"),
         apiFetch<DeveloperItem[]>("/api/developers"),
         apiFetch<TeamDoraMetricsResponse>("/api/dora/team"),
+        apiFetch<Thresholds>("/api/config/thresholds"),
       ]);
       setTeamPerf(perf);
       setCycleByDev(cycle);
       setTeamPrsPerWeek(prsWeek);
       setDevelopers(devs);
       setTeamDoraMetrics(dora);
+      setThresholds(thresh);
       if (!selectedDeveloper && devs.length > 0) {
         setSelectedDeveloper(devs[0].github_username);
       }
@@ -826,16 +1136,7 @@ export default function GitAnalyticsDashboard() {
             loading={doraLoading}
             error={doraError}
           />
-        ) : (
-          <DoraMetricsPanel
-            title={`${selectedDeveloper || "Developer"} Delivery Performance`}
-            subtitle="Individual GitHub delivery metrics inspired by DORA, derived from saved PR and review activity."
-            metrics={developerDoraMetrics?.summary ?? null}
-            weeklyTrends={developerDoraMetrics?.weekly_trends ?? []}
-            loading={doraLoading}
-            error={doraError}
-          />
-        )}
+        ) : null}
 
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/10">
@@ -893,10 +1194,15 @@ export default function GitAnalyticsDashboard() {
         </div>
 
         {!isTeamView && (
-          <DeveloperAnalyticsPanel
+          <IndividualPerformancePanel
             analytics={developerAnalytics}
             error={analyticsError}
             loading={analyticsLoading}
+            doraMetrics={developerDoraMetrics?.summary ?? null}
+            doraWeeklyTrends={developerDoraMetrics?.weekly_trends ?? []}
+            doraLoading={doraLoading}
+            doraError={doraError}
+            thresholds={thresholds}
           />
         )}
       </div>
