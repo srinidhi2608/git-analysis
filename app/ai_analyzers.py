@@ -270,12 +270,12 @@ class HeuristicFallbackHandler(BaseMetricsAnalyzer):
 
         # Actionable feedback
         feedback: list[str] = []
-        if requested_changes_rate > 30:
+        if requested_changes_rate > settings.requested_changes_risky_pct:
             feedback.append(
                 f"Reduce requested-changes rate (currently {requested_changes_rate:.1f}%) "
                 "by strengthening pre-review self-review."
             )
-        if metrics.get("average_pr_size", 0) > 600:
+        if metrics.get("average_pr_size", 0) > settings.large_pr_threshold_lines:
             feedback.append(
                 f"Split large PRs (avg {metrics['average_pr_size']:.0f} lines) into "
                 "smaller, focused changes to ease reviewer load."
@@ -285,7 +285,7 @@ class HeuristicFallbackHandler(BaseMetricsAnalyzer):
                 "Address maintainability feedback by extracting shared logic into "
                 "well-named helpers or services."
             )
-        if avg_comments > 5:
+        if avg_comments > settings.high_comments_per_pr_threshold * 2.5:
             feedback.append(
                 "High comment density may indicate unclear code intent — add inline "
                 "documentation for complex sections."

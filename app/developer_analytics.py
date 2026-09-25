@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +25,36 @@ COMMENT_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "maintainability": ("refactor", "duplicate", "simplify", "maintain", "structure", "modular"),
     "performance": ("performance", "slow", "efficient", "optimize", "latency", "n+1"),
     "security": ("security", "sanitize", "validate", "auth", "permission", "secret", "xss", "csrf"),
+}
+
+EXTENSION_TO_LANGUAGE: dict[str, str] = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".java": "Java",
+    ".go": "Go",
+    ".rs": "Rust",
+    ".rb": "Ruby",
+    ".cs": "C#",
+    ".cpp": "C++",
+    ".c": "C",
+    ".h": "C/C++",
+    ".php": "PHP",
+    ".swift": "Swift",
+    ".kt": "Kotlin",
+    ".scala": "Scala",
+    ".sh": "Shell",
+    ".yaml": "YAML",
+    ".yml": "YAML",
+    ".json": "JSON",
+    ".html": "HTML",
+    ".css": "CSS",
+    ".scss": "SCSS",
+    ".sql": "SQL",
+    ".md": "Markdown",
+    ".tf": "Terraform",
 }
 
 
@@ -134,9 +165,9 @@ class HeuristicDeveloperAnalyticsNarrator:
         repeated_categories = [item["category"] for item in breakdown["repeated_issue_categories"][:3]]
 
         confidence = "low"
-        if prs >= 5 and comment_text_items >= 8:
+        if prs >= settings.confidence_min_prs and comment_text_items >= settings.confidence_min_comments:
             confidence = "medium"
-        if prs >= 8 and comment_text_items >= 15 and avg_followup is not None:
+        if prs >= settings.confidence_min_prs * 2 - 2 and comment_text_items >= settings.confidence_min_comments * 2 - 1 and avg_followup is not None:
             confidence = "high"
 
         overview_lead = (
@@ -178,7 +209,7 @@ class HeuristicDeveloperAnalyticsNarrator:
         risks: list[str] = []
         if repeated_categories:
             risks.append("Repeated review themes: " + ", ".join(repeated_categories) + ".")
-        if avg_pr_size > 600:
+        if avg_pr_size > settings.large_pr_threshold_lines:
             risks.append(f"Average PR size is {avg_pr_size:.0f} changed lines, which can slow reviews.")
         if avg_resolution is not None and avg_resolution > 24:
             risks.append(
@@ -194,9 +225,9 @@ class HeuristicDeveloperAnalyticsNarrator:
             recommendations.append("Strengthen test coverage before review when changes touch logic-heavy code.")
         if any(item["category"] in {"style", "maintainability"} for item in top_categories):
             recommendations.append("Use local linting and small cleanup passes before opening PRs to reduce style churn.")
-        if avg_pr_size > 600:
+        if avg_pr_size > settings.large_pr_threshold_lines:
             recommendations.append("Split large changes into smaller PRs to improve review throughput.")
-        if avg_followup is not None and avg_followup > 12:
+        if avg_followup is not None and avg_followup > settings.followup_good_threshold_hours:
             recommendations.append("Aim for faster first follow-up on review feedback to reduce cycle time.")
         if not recommendations:
             recommendations.append("Keep PRs small and continue resolving review feedback with the current pace.")
@@ -393,6 +424,7 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
                 PullRequestComment.author_login,
                 PullRequestComment.body,
                 PullRequestComment.created_at,
+                PullRequestComment.path,
             ),
             selectinload(PullRequest.commits).load_only(
                 Commit.committed_at,
@@ -414,6 +446,7 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
     comment_categories: Counter[str] = Counter()
     category_prs: defaultdict[str, set[int]] = defaultdict(set)
     reviewer_comment_counts: Counter[str] = Counter()
+    detected_languages: set[str] = set()
     pr_breakdown: list[dict[str, Any]] = []
     saved_comment_text_items = 0
 
@@ -424,7 +457,7 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
         total_review_comments += pull_request.review_comments_count or 0
         if (pull_request.requested_changes_count or 0) > 0:
             requested_changes_prs += 1
-        if pr_size >= 600:
+        if pr_size >= settings.large_pr_threshold_lines:
             large_prs += 1
         if pull_request.cycle_time_minutes is not None:
             cycle_times.append(pull_request.cycle_time_minutes / 60)
@@ -444,6 +477,12 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
         for comment in feedback_items:
             if comment.author_login:
                 reviewer_comment_counts[comment.author_login] += 1
+            # Detect language from commented file path
+            if comment.path:
+                ext = os.path.splitext(comment.path)[1].lower()
+                lang = EXTENSION_TO_LANGUAGE.get(ext)
+                if lang:
+                    detected_languages.add(lang)
             body = (comment.body or "").strip()
             if not body:
                 continue
@@ -603,6 +642,7 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
     return {
         "github_username": developer.github_username,
         "team_name": developer.team_name,
+        "languages": sorted(detected_languages),
         "metrics": metrics,
         "breakdown": breakdown,
         "sample": sample,
