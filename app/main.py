@@ -8,8 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.database import Base, SessionLocal, engine, get_db
+from app.database import SessionLocal, ensure_database_schema, get_db
 from app.config_loader import load_active_repositories
+from app.developer_analytics import get_developer_review_analytics
+from app.dora_metrics import get_developer_dora_metrics, get_team_dora_metrics
 from app.queries import (
     get_developer_metrics,
     get_team_performance_metrics,
@@ -20,7 +22,7 @@ from app.queries import (
 from app.ingest import run_ingestion
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel(logging.INFO)
 active_repos: list = []
 
 # ---------------------------------------------------------------------------
@@ -67,6 +69,121 @@ class IngestRequest(BaseModel):
     lookback_days: int = 7
 
 
+class DeveloperAnalyticsMetricsResponse(BaseModel):
+    pull_request_count: int
+    merged_pull_request_count: int
+    total_review_comments: int
+    average_comments_per_pr: float
+    average_pr_size: float
+    average_changed_files: float
+    largest_pr_size: int
+    comment_density_per_100_lines: float
+    requested_changes_rate: float
+    average_rework_commits_per_pr: float
+    average_cycle_time_hours: float | None
+    average_time_to_first_followup_hours: float | None
+    average_time_to_merge_after_feedback_hours: float | None
+    large_pr_rate: float
+
+
+class CommentCategoryItem(BaseModel):
+    category: str
+    count: int
+
+
+class RepeatedIssueCategoryItem(BaseModel):
+    category: str
+    count: int
+    pull_request_count: int
+
+
+class DeveloperReviewPullRequestItem(BaseModel):
+    pr_number: int
+    title: str
+    created_at: str | None
+    merged_at: str | None
+    review_comments: int
+    requested_changes: int
+    rework_commits: int
+    size: int
+
+
+class DeveloperAnalyticsBreakdownResponse(BaseModel):
+    comment_categories: list[CommentCategoryItem]
+    repeated_issue_categories: list[RepeatedIssueCategoryItem]
+    pull_requests: list[DeveloperReviewPullRequestItem]
+
+
+class DeveloperAnalyticsCategorySummary(BaseModel):
+    key: str
+    label: str
+    score: int | None
+    assessment: str
+    evidence: list[str]
+
+
+class DeveloperAnalyticsSummaryResponse(BaseModel):
+    provider: str
+    confidence: str
+    overview: str
+    categories: list[DeveloperAnalyticsCategorySummary]
+    highlights: list[str]
+    risks: list[str]
+    recommendations: list[str]
+
+
+class DeveloperAnalyticsSampleResponse(BaseModel):
+    pull_requests: int
+    comment_text_items: int
+    followup_samples: int
+    resolution_samples: int
+
+
+class DeveloperAnalyticsResponse(BaseModel):
+    github_username: str
+    team_name: str | None
+    metrics: DeveloperAnalyticsMetricsResponse
+    breakdown: DeveloperAnalyticsBreakdownResponse
+    sample: DeveloperAnalyticsSampleResponse
+    summary: DeveloperAnalyticsSummaryResponse
+
+
+class DoraSummaryResponse(BaseModel):
+    window_days: int
+    pull_request_count: int
+    merged_pull_request_count: int
+    reviewed_pull_request_count: int
+    merge_frequency_per_week: float
+    average_lead_time_hours: float | None
+    median_lead_time_hours: float | None
+    average_time_to_first_review_hours: float | None
+    review_coverage_rate: float
+    approval_rate: float
+    change_failure_proxy_rate: float
+    average_recovery_time_hours: float | None
+    recovery_samples: int
+
+
+class DoraWeeklyTrendItem(BaseModel):
+    week: str
+    merged_prs: int
+    average_lead_time_hours: float | None
+    average_time_to_first_review_hours: float | None
+    change_failure_proxy_rate: float
+
+
+class TeamDoraMetricsResponse(BaseModel):
+    summary: DoraSummaryResponse
+    weekly_trends: list[DoraWeeklyTrendItem]
+
+
+class DeveloperDoraMetricsResponse(BaseModel):
+    github_username: str
+    team_name: str | None
+    summary: DoraSummaryResponse
+    weekly_trends: list[DoraWeeklyTrendItem]
+
+
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
@@ -74,7 +191,7 @@ class IngestRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    ensure_database_schema()
     global active_repos
     active_repos = load_active_repositories()
     yield
@@ -110,6 +227,11 @@ def team_performance(db: Session = Depends(get_db)):
     return get_team_performance_metrics(db)
 
 
+@app.get("/api/dora/team", response_model=TeamDoraMetricsResponse)
+def team_dora_metrics(db: Session = Depends(get_db)):
+    return get_team_dora_metrics(db)
+
+
 @app.get("/api/developers", response_model=list[DeveloperItem])
 def list_developers(db: Session = Depends(get_db)):
     return get_all_developers(db)
@@ -118,6 +240,22 @@ def list_developers(db: Session = Depends(get_db)):
 @app.get("/api/developers/{github_username}", response_model=DeveloperMetricsResponse)
 def developer_metrics(github_username: str, db: Session = Depends(get_db)):
     metrics = get_developer_metrics(db, github_username)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Developer not found")
+    return metrics
+
+
+@app.get("/api/developers/{github_username}/analytics", response_model=DeveloperAnalyticsResponse)
+def developer_analytics(github_username: str, db: Session = Depends(get_db)):
+    analytics = get_developer_review_analytics(db, github_username)
+    if analytics is None:
+        raise HTTPException(status_code=404, detail="Developer not found")
+    return analytics
+
+
+@app.get("/api/developers/{github_username}/dora", response_model=DeveloperDoraMetricsResponse)
+def developer_dora_metrics(github_username: str, db: Session = Depends(get_db)):
+    metrics = get_developer_dora_metrics(db, github_username)
     if metrics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return metrics

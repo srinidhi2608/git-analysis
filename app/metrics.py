@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel(logging.INFO)
 
 def _parse_dt(value: str | datetime | None) -> datetime | None:
     """Parse an ISO-8601 string or return a datetime as-is; returns None if falsy."""
