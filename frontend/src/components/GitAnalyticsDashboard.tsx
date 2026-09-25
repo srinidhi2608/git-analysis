@@ -105,6 +105,17 @@ interface DeveloperAnalyticsSummary {
   highlights: string[];
   risks: string[];
   recommendations: string[];
+  strengths: string[];
+  improvement_areas: string[];
+  coding_standards_score: number | null;
+  design_patterns_summary: string;
+  dry_vs_wet_observations: string;
+  reviewer_rigor_score: number | null;
+}
+
+interface ReviewerItem {
+  login: string;
+  comment_count: number;
 }
 
 interface DeveloperAnalyticsResponse {
@@ -130,6 +141,7 @@ interface DeveloperAnalyticsResponse {
     comment_categories: CommentCategoryItem[];
     repeated_issue_categories: Array<{ category: string; count: number; pull_request_count: number }>;
     pull_requests: DeveloperAnalyticsPullRequestItem[];
+    reviewers: ReviewerItem[];
   };
   sample: {
     pull_requests: number;
@@ -173,13 +185,15 @@ function AdvancedMetricCard({
   );
 }
 
-function AnalyticsBullets({ title, items, tone = "slate" }: { title: string; items: string[]; tone?: "slate" | "rose" | "emerald" }) {
+function AnalyticsBullets({ title, items, tone = "slate" }: { title: string; items: string[]; tone?: "slate" | "rose" | "emerald" | "amber" }) {
   const toneClass =
     tone === "rose"
       ? "border-rose-900/40 bg-rose-950/20"
       : tone === "emerald"
         ? "border-emerald-900/40 bg-emerald-950/20"
-        : "border-slate-800 bg-slate-950/30";
+        : tone === "amber"
+          ? "border-amber-900/40 bg-amber-950/20"
+          : "border-slate-800 bg-slate-950/30";
 
   return (
     <div className={`rounded-2xl border p-4 ${toneClass}`}>
@@ -556,6 +570,58 @@ function DeveloperAnalyticsPanel({
         <AnalyticsBullets title="Risks" items={analytics.summary.risks} tone="rose" />
         <AnalyticsBullets title="Recommendations" items={analytics.summary.recommendations} />
       </div>
+
+      {/* Strengths & Improvement Areas */}
+      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+        <AnalyticsBullets
+          title="Strengths"
+          items={analytics.summary.strengths?.length ? analytics.summary.strengths : ["Insufficient data to identify specific strengths yet."]}
+          tone="emerald"
+        />
+        <AnalyticsBullets
+          title="Improvement Areas"
+          items={analytics.summary.improvement_areas?.length ? analytics.summary.improvement_areas : ["No specific improvement areas identified."]}
+          tone="amber"
+        />
+      </div>
+
+      {/* AI Code Quality Signals */}
+      {(analytics.summary.design_patterns_summary || analytics.summary.dry_vs_wet_observations) && (
+        <div className="mt-6 grid gap-4 lg:grid-cols-2">
+          {analytics.summary.design_patterns_summary && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+              <p className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-slate-400">Design Patterns</p>
+              <p className="text-sm text-slate-300">{analytics.summary.design_patterns_summary}</p>
+            </div>
+          )}
+          {analytics.summary.dry_vs_wet_observations && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+              <p className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-slate-400">DRY vs WET Observations</p>
+              <p className="text-sm text-slate-300">{analytics.summary.dry_vs_wet_observations}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Reviewer Ranking */}
+      {analytics.breakdown.reviewers?.length > 0 && (
+        <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/40 p-4 shadow-sm shadow-slate-950/20">
+          <h3 className="mb-4 text-sm font-medium text-slate-200">Top Reviewers by Comments</h3>
+          <ol className="space-y-2">
+            {analytics.breakdown.reviewers.map((reviewer, idx) => (
+              <li key={reviewer.login} className="flex items-center gap-3 text-sm">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-800 text-xs font-semibold text-slate-300">
+                  {idx + 1}
+                </span>
+                <span className="flex-1 font-medium text-slate-200">{reviewer.login}</span>
+                <span className="rounded-full border border-slate-700 bg-slate-800 px-2.5 py-0.5 text-xs text-slate-300">
+                  {reviewer.comment_count} {reviewer.comment_count === 1 ? "comment" : "comments"}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
     </div>
   );
 }

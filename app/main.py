@@ -108,10 +108,16 @@ class DeveloperReviewPullRequestItem(BaseModel):
     size: int
 
 
+class ReviewerItem(BaseModel):
+    login: str
+    comment_count: int
+
+
 class DeveloperAnalyticsBreakdownResponse(BaseModel):
     comment_categories: list[CommentCategoryItem]
     repeated_issue_categories: list[RepeatedIssueCategoryItem]
     pull_requests: list[DeveloperReviewPullRequestItem]
+    reviewers: list[ReviewerItem] = []
 
 
 class DeveloperAnalyticsCategorySummary(BaseModel):
@@ -130,6 +136,12 @@ class DeveloperAnalyticsSummaryResponse(BaseModel):
     highlights: list[str]
     risks: list[str]
     recommendations: list[str]
+    strengths: list[str] = []
+    improvement_areas: list[str] = []
+    coding_standards_score: float | None = None
+    design_patterns_summary: str = ""
+    dry_vs_wet_observations: str = ""
+    reviewer_rigor_score: float | None = None
 
 
 class DeveloperAnalyticsSampleResponse(BaseModel):
@@ -246,8 +258,8 @@ def developer_metrics(github_username: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/developers/{github_username}/analytics", response_model=DeveloperAnalyticsResponse)
-def developer_analytics(github_username: str, db: Session = Depends(get_db)):
-    analytics = get_developer_review_analytics(db, github_username)
+async def developer_analytics(github_username: str, db: Session = Depends(get_db)):
+    analytics = await get_developer_review_analytics(db, github_username)
     if analytics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return analytics
