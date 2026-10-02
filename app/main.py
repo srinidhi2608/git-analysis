@@ -1,10 +1,14 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -215,7 +219,7 @@ app = FastAPI(title="Git Analysis API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -226,7 +230,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 
-@app.get("/")
+@app.get("/health")
 def root():
     return {"message": "Git Analysis API is running"}
 
@@ -328,3 +332,23 @@ def trigger_ingest(
         status="accepted",
         message=f"Ingestion started in the background for the last {payload.lookback_days} days. Refresh data in a few seconds.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Serve the React SPA (production build embedded in the Docker image)
+# ---------------------------------------------------------------------------
+# The frontend is built into frontend/dist during the Docker image build.
+# In development the Vite dev server handles the UI; in production FastAPI
+# serves the built assets so no separate web server is needed.
+
+_FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+if _FRONTEND_DIST.is_dir():
+    # Serve JS/CSS/image assets under /assets
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        """Return index.html for any path not matched by an API route."""
+        index = _FRONTEND_DIST / "index.html"
+        return FileResponse(str(index))

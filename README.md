@@ -130,7 +130,94 @@ The backend probes this endpoint on each analytics request and automatically fal
 | 2 – Local Ollama | Ollama `/api/tags` is reachable | Calls local model |
 | 3 – Heuristic | Always available | Rule-based scoring |
 
-## 3) Backend setup and start commands
+## 3) Running with Docker (recommended)
+
+The easiest way to start the full application (PostgreSQL + backend + React UI) is with Docker Compose. No local Python, Node.js, or PostgreSQL installation is required.
+
+### 3.1 Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose) — version 24+ recommended
+- A GitHub Personal Access Token (PAT) with `repo` read access
+
+### 3.2 First-time setup
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/srinidhi2608/git-analysis.git
+cd git-analysis
+
+# 2. Create your .env file from the example
+cp .env.example .env
+
+# 3. Open .env and set your GitHub token (the only required change)
+#    GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+#
+#    Optionally set a custom DB password (default: changeme):
+#    POSTGRES_PASSWORD=my-secure-password
+#
+#    All other settings have sensible defaults — see .env.example for details.
+```
+
+Edit `config.yaml` to list the GitHub repositories you want to track:
+
+```yaml
+repositories:
+  - name: "your-org/your-repo"
+    is_active: true
+```
+
+### 3.3 Build and start
+
+```bash
+docker compose up --build
+```
+
+This command:
+1. Builds the React frontend (Node 20 + Vite)
+2. Builds the Python backend (Python 3.11 + FastAPI/uvicorn)
+3. Starts a PostgreSQL 16 container with a persistent volume
+4. Creates all database tables automatically on first start
+
+Open **http://localhost:8000** — the React dashboard and the API are served from the same port.
+
+> **Note:** The first build takes a few minutes because it downloads base images and installs dependencies. Subsequent starts (without `--build`) are near-instant.
+
+### 3.4 Everyday use
+
+| Goal | Command |
+|---|---|
+| Start (after first build) | `docker compose up` |
+| Start in background | `docker compose up -d` |
+| Stop | `docker compose down` |
+| Stop and delete DB data | `docker compose down -v` |
+| Rebuild after code change | `docker compose up --build` |
+| View logs | `docker compose logs -f app` |
+| Open a DB shell | `docker compose exec db psql -U git_user git_analysis` |
+
+### 3.5 Loading sample data (optional)
+
+```bash
+# Seed 3 developers, 10 PRs, and 45 review comments for local demos:
+docker compose exec db psql -U git_user git_analysis -f /dev/stdin < scripts/seed_data.sql
+
+# Clear all data and re-seed:
+docker compose exec db psql -U git_user git_analysis -f /dev/stdin < scripts/clear_data.sql
+docker compose exec db psql -U git_user git_analysis -f /dev/stdin < scripts/seed_data.sql
+```
+
+### 3.6 Using a local Ollama model inside Docker
+
+If you want the Tier-2 LLM to call a locally running Ollama instance from inside the Docker container, point `OLLAMA_BASE_URL` at the Docker host:
+
+```env
+# Linux
+OLLAMA_BASE_URL=http://172.17.0.1:11434
+
+# macOS / Windows Docker Desktop
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+## 4) Backend setup and start commands (without Docker)
 
 From the project root directory:
 
@@ -169,7 +256,7 @@ WHERE table_name IN ('pull_requests', 'commits')
 ORDER BY table_name, ordinal_position;
 ```
 
-## 4) Backend endpoints
+## 5) Backend endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -187,7 +274,7 @@ ORDER BY table_name, ordinal_position;
 | GET | `/api/chart/prs-per-week` | PRs merged per ISO week (for line chart); accepts optional `?developer=<username>` |
 | POST | `/api/ingest` | Triggers GitHub data fetch and saves PRs to Postgres (runs in background) |
 
-## 5) Triggering data ingestion
+## 6) Triggering data ingestion
 
 Data is fetched from the GitHub GraphQL API using the PAT in `.env`.  
 You can trigger ingestion two ways:
@@ -208,7 +295,7 @@ Saved pull request records now also capture:
 - Changed-file and diff-size metadata
 - Commit timestamps used for review follow-up estimates
 
-## 6) Dashboard UI setup
+## 7) Dashboard UI setup
 
 ### 6.1 Install frontend dependencies
 
@@ -252,7 +339,7 @@ Open `http://localhost:5173` (or the URL shown in terminal).
      - **Reviewers** — list of reviewers ranked by number of review comments left on the developer's PRs
 9. Hover over chart points/bars — tooltips appear
 
-## 7) DORA-inspired GitHub metrics added to the dashboard
+## 8) DORA-inspired GitHub metrics added to the dashboard
 
 The app now includes a GitHub-native interpretation of DORA software delivery ideas. Because this project currently analyzes pull requests, reviews, comments, and commits — not production deploys or incident systems — the dashboard uses **proxies** that fit GitHub data.
 
@@ -286,7 +373,7 @@ The app now includes a GitHub-native interpretation of DORA software delivery id
 
 These are **DORA-inspired engineering workflow metrics**, not exact production DORA metrics. True deployment frequency, change failure rate, and mean time to restore service require deployment and incident data that is outside the current GitHub-only dataset.
 
-## 8) Sample seed data
+## 9) Sample seed data
 
 The `scripts/` directory contains SQL files for local development and demos.
 
