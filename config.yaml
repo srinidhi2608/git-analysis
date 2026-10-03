@@ -1,8 +1,5 @@
 repositories:
   - name: "srinidhi2608/git-analysis"
     is_active: true
-  - name: "tiangolo/fastapi"
-    is_active: true
-  - name: "fastapi/fastapi"
-    is_active: true
+
 

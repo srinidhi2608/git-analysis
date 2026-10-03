@@ -132,7 +132,7 @@ class OnlineAIHandler(BaseMetricsAnalyzer):
             "response_format": {"type": "json_object"},
             "temperature": 0.2,
         }
-
+        logger.info("Sending request to online AI at %s", base_url)
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 f"{base_url}/chat/completions",
@@ -180,7 +180,7 @@ class LocalOllamaHandler(BaseMetricsAnalyzer):
             ],
             "format": "json",
         }
-
+        logger.info("Sending request to local Ollama instance at %s", url)
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
@@ -205,7 +205,8 @@ class HeuristicFallbackHandler(BaseMetricsAnalyzer):
     ) -> DeveloperAnalysisResult:
         metrics = pr_data.get("metrics", {})
         breakdown = pr_data.get("breakdown", {})
-
+        
+        logger.info("Analyzing developer metrics for %s", developer)
         # Coding standards score (1-10)
         requested_changes_rate = metrics.get("requested_changes_rate", 0)
         comments_per_pr = metrics.get("average_comments_per_pr", 0)
