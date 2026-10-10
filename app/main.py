@@ -1,14 +1,19 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, ensure_database_schema, get_db
+from app.config import settings
 from app.config_loader import load_active_repositories
 from app.developer_analytics import get_developer_review_analytics
 from app.dora_metrics import get_developer_dora_metrics, get_team_dora_metrics
@@ -108,10 +113,16 @@ class DeveloperReviewPullRequestItem(BaseModel):
     size: int
 
 
+class ReviewerItem(BaseModel):
+    login: str
+    comment_count: int
+
+
 class DeveloperAnalyticsBreakdownResponse(BaseModel):
     comment_categories: list[CommentCategoryItem]
     repeated_issue_categories: list[RepeatedIssueCategoryItem]
     pull_requests: list[DeveloperReviewPullRequestItem]
+    reviewers: list[ReviewerItem] = []
 
 
 class DeveloperAnalyticsCategorySummary(BaseModel):
@@ -130,6 +141,12 @@ class DeveloperAnalyticsSummaryResponse(BaseModel):
     highlights: list[str]
     risks: list[str]
     recommendations: list[str]
+    strengths: list[str] = []
+    improvement_areas: list[str] = []
+    coding_standards_score: float | None = None
+    design_patterns_summary: str = ""
+    dry_vs_wet_observations: str = ""
+    reviewer_rigor_score: float | None = None
 
 
 class DeveloperAnalyticsSampleResponse(BaseModel):
@@ -142,6 +159,7 @@ class DeveloperAnalyticsSampleResponse(BaseModel):
 class DeveloperAnalyticsResponse(BaseModel):
     github_username: str
     team_name: str | None
+    languages: list[str] = []
     metrics: DeveloperAnalyticsMetricsResponse
     breakdown: DeveloperAnalyticsBreakdownResponse
     sample: DeveloperAnalyticsSampleResponse
@@ -201,7 +219,7 @@ app = FastAPI(title="Git Analysis API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -212,9 +230,27 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 
-@app.get("/")
+@app.get("/health")
 def root():
     return {"message": "Git Analysis API is running"}
+
+
+@app.get("/api/config/thresholds")
+def get_thresholds():
+    """Return configurable metric thresholds used by the dashboard."""
+    return {
+        "large_pr_threshold_lines": settings.large_pr_threshold_lines,
+        "followup_good_threshold_hours": settings.followup_good_threshold_hours,
+        "requested_changes_risky_pct": settings.requested_changes_risky_pct,
+        "high_comments_per_pr_threshold": settings.high_comments_per_pr_threshold,
+        "lead_time_healthy_hours": settings.lead_time_healthy_hours,
+        "first_review_healthy_hours": settings.first_review_healthy_hours,
+        "review_coverage_good_pct": settings.review_coverage_good_pct,
+        "approval_rate_good_pct": settings.approval_rate_good_pct,
+        "change_failure_acceptable_pct": settings.change_failure_acceptable_pct,
+        "confidence_min_prs": settings.confidence_min_prs,
+        "confidence_min_comments": settings.confidence_min_comments,
+    }
 
 
 @app.get("/active-repositories")
@@ -246,8 +282,8 @@ def developer_metrics(github_username: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/developers/{github_username}/analytics", response_model=DeveloperAnalyticsResponse)
-def developer_analytics(github_username: str, db: Session = Depends(get_db)):
-    analytics = get_developer_review_analytics(db, github_username)
+async def developer_analytics(github_username: str, db: Session = Depends(get_db)):
+    analytics = await get_developer_review_analytics(db, github_username)
     if analytics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return analytics
@@ -296,3 +332,23 @@ def trigger_ingest(
         status="accepted",
         message=f"Ingestion started in the background for the last {payload.lookback_days} days. Refresh data in a few seconds.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Serve the React SPA (production build embedded in the Docker image)
+# ---------------------------------------------------------------------------
+# The frontend is built into frontend/dist during the Docker image build.
+# In development the Vite dev server handles the UI; in production FastAPI
+# serves the built assets so no separate web server is needed.
+
+_FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+if _FRONTEND_DIST.is_dir():
+    # Serve JS/CSS/image assets under /assets
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        """Return index.html for any path not matched by an API route."""
+        index = _FRONTEND_DIST / "index.html"
+        return FileResponse(str(index))

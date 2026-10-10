@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +12,7 @@ from typing import Any, Protocol
 import requests
 from sqlalchemy.orm import Session, load_only, selectinload
 
+from app.ai_analyzers import get_developer_analyzer
 from app.config import settings
 from app.models import Commit, Developer, PullRequest, PullRequestComment
 
@@ -23,6 +25,36 @@ COMMENT_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "maintainability": ("refactor", "duplicate", "simplify", "maintain", "structure", "modular"),
     "performance": ("performance", "slow", "efficient", "optimize", "latency", "n+1"),
     "security": ("security", "sanitize", "validate", "auth", "permission", "secret", "xss", "csrf"),
+}
+
+EXTENSION_TO_LANGUAGE: dict[str, str] = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".java": "Java",
+    ".go": "Go",
+    ".rs": "Rust",
+    ".rb": "Ruby",
+    ".cs": "C#",
+    ".cpp": "C++",
+    ".c": "C",
+    ".h": "C/C++",
+    ".php": "PHP",
+    ".swift": "Swift",
+    ".kt": "Kotlin",
+    ".scala": "Scala",
+    ".sh": "Shell",
+    ".yaml": "YAML",
+    ".yml": "YAML",
+    ".json": "JSON",
+    ".html": "HTML",
+    ".css": "CSS",
+    ".scss": "SCSS",
+    ".sql": "SQL",
+    ".md": "Markdown",
+    ".tf": "Terraform",
 }
 
 
@@ -133,9 +165,9 @@ class HeuristicDeveloperAnalyticsNarrator:
         repeated_categories = [item["category"] for item in breakdown["repeated_issue_categories"][:3]]
 
         confidence = "low"
-        if prs >= 5 and comment_text_items >= 8:
+        if prs >= settings.confidence_min_prs and comment_text_items >= settings.confidence_min_comments:
             confidence = "medium"
-        if prs >= 8 and comment_text_items >= 15 and avg_followup is not None:
+        if prs >= settings.confidence_high_prs and comment_text_items >= settings.confidence_high_comments and avg_followup is not None:
             confidence = "high"
 
         overview_lead = (
@@ -177,7 +209,7 @@ class HeuristicDeveloperAnalyticsNarrator:
         risks: list[str] = []
         if repeated_categories:
             risks.append("Repeated review themes: " + ", ".join(repeated_categories) + ".")
-        if avg_pr_size > 600:
+        if avg_pr_size > settings.large_pr_threshold_lines:
             risks.append(f"Average PR size is {avg_pr_size:.0f} changed lines, which can slow reviews.")
         if avg_resolution is not None and avg_resolution > 24:
             risks.append(
@@ -193,9 +225,9 @@ class HeuristicDeveloperAnalyticsNarrator:
             recommendations.append("Strengthen test coverage before review when changes touch logic-heavy code.")
         if any(item["category"] in {"style", "maintainability"} for item in top_categories):
             recommendations.append("Use local linting and small cleanup passes before opening PRs to reduce style churn.")
-        if avg_pr_size > 600:
+        if avg_pr_size > settings.large_pr_threshold_lines:
             recommendations.append("Split large changes into smaller PRs to improve review throughput.")
-        if avg_followup is not None and avg_followup > 12:
+        if avg_followup is not None and avg_followup > settings.followup_good_threshold_hours:
             recommendations.append("Aim for faster first follow-up on review feedback to reduce cycle time.")
         if not recommendations:
             recommendations.append("Keep PRs small and continue resolving review feedback with the current pace.")
@@ -360,7 +392,7 @@ def _hours_between(later: datetime | None, earlier: datetime | None) -> float | 
     return (later - earlier).total_seconds() / 3600
 
 
-def get_developer_review_analytics(db: Session, github_username: str) -> dict[str, Any] | None:
+async def get_developer_review_analytics(db: Session, github_username: str) -> dict[str, Any] | None:
     developer = (
         db.query(Developer)
         .options(load_only(Developer.id, Developer.github_username, Developer.team_name))
@@ -392,6 +424,7 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
                 PullRequestComment.author_login,
                 PullRequestComment.body,
                 PullRequestComment.created_at,
+                PullRequestComment.path,
             ),
             selectinload(PullRequest.commits).load_only(
                 Commit.committed_at,
@@ -412,6 +445,8 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
     resolution_hours: list[float] = []
     comment_categories: Counter[str] = Counter()
     category_prs: defaultdict[str, set[int]] = defaultdict(set)
+    reviewer_comment_counts: Counter[str] = Counter()
+    detected_languages: set[str] = set()
     pr_breakdown: list[dict[str, Any]] = []
     saved_comment_text_items = 0
 
@@ -422,7 +457,7 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
         total_review_comments += pull_request.review_comments_count or 0
         if (pull_request.requested_changes_count or 0) > 0:
             requested_changes_prs += 1
-        if pr_size >= 600:
+        if pr_size >= settings.large_pr_threshold_lines:
             large_prs += 1
         if pull_request.cycle_time_minutes is not None:
             cycle_times.append(pull_request.cycle_time_minutes / 60)
@@ -440,6 +475,14 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
         last_feedback_at = feedback_timestamps[-1] if feedback_timestamps else pull_request.last_review_comment_at
 
         for comment in feedback_items:
+            if comment.author_login:
+                reviewer_comment_counts[comment.author_login] += 1
+            # Detect language from commented file path
+            if comment.path:
+                ext = os.path.splitext(comment.path)[1].lower()
+                lang = EXTENSION_TO_LANGUAGE.get(ext)
+                if lang:
+                    detected_languages.add(lang)
             body = (comment.body or "").strip()
             if not body:
                 continue
@@ -528,6 +571,10 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
             if len(pr_numbers) >= 2
         ],
         "pull_requests": pr_breakdown[:10],
+        "reviewers": [
+            {"login": login, "comment_count": count}
+            for login, count in reviewer_comment_counts.most_common()
+        ],
     }
 
     snapshot = DeveloperAnalyticsSnapshot(
@@ -550,9 +597,52 @@ def get_developer_review_analytics(db: Session, github_username: str) -> dict[st
             logger.exception("Heuristic developer analytics narrator also failed for %s.", github_username)
             raise
 
+    # Run 3-tier AI analyzer to enrich the summary with strengths, improvement areas,
+    # and detailed code-quality signals.
+    pr_data_for_ai = {"metrics": metrics, "breakdown": breakdown}
+    review_comments_for_ai = [
+        {"author": item["login"], "comment_count": item["comment_count"]}
+        for item in breakdown["reviewers"]
+    ]
+    try:
+        ai_result = await get_developer_analyzer(
+            developer=github_username,
+            pr_data=pr_data_for_ai,
+            review_comments=review_comments_for_ai,
+        )
+        strengths: list[str] = []
+        if ai_result.coding_standards_score >= 7:
+            strengths.append(
+                f"Strong coding standards (score {ai_result.coding_standards_score}/10)."
+            )
+        if ai_result.reviewer_rigor_score >= 7:
+            strengths.append(
+                f"High-quality review engagement (rigor score {ai_result.reviewer_rigor_score}/10)."
+            )
+        if not strengths:
+            strengths = summary.get("highlights", [])
+
+        improvement_areas: list[str] = list(ai_result.actionable_feedback)
+
+        summary["coding_standards_score"] = ai_result.coding_standards_score
+        summary["design_patterns_summary"] = ai_result.design_patterns_summary
+        summary["dry_vs_wet_observations"] = ai_result.dry_vs_wet_observations
+        summary["reviewer_rigor_score"] = ai_result.reviewer_rigor_score
+        summary["strengths"] = strengths
+        summary["improvement_areas"] = improvement_areas
+    except Exception:
+        logger.exception("AI analyzer enrichment failed for %s. Using heuristic summary only.", github_username)
+        summary["coding_standards_score"] = None
+        summary["design_patterns_summary"] = ""
+        summary["dry_vs_wet_observations"] = ""
+        summary["reviewer_rigor_score"] = None
+        summary["strengths"] = summary.get("highlights", [])
+        summary["improvement_areas"] = summary.get("recommendations", [])
+
     return {
         "github_username": developer.github_username,
         "team_name": developer.team_name,
+        "languages": sorted(detected_languages),
         "metrics": metrics,
         "breakdown": breakdown,
         "sample": sample,

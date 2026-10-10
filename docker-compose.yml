@@ -1,0 +1,59 @@
+# =============================================================================
+# docker-compose.yml — Git Analysis
+#
+# Services:
+#   db  — PostgreSQL 16 (stores PR, commit, and developer data)
+#   app — FastAPI backend + React frontend served on port 8000
+#
+# Quick start:
+#   1. cp .env.example .env        # fill in GITHUB_TOKEN (DATABASE_URL is set automatically)
+#   2. docker compose up --build
+#   3. Open http://localhost:8000
+# =============================================================================
+
+services:
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: git_analysis
+      POSTGRES_USER: git_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U git_user -d git_analysis"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── Application ────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Override with a real token — required for GitHub data ingestion
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      # Automatically wired to the db service above
+      DATABASE_URL: postgresql://git_user:${POSTGRES_PASSWORD:-changeme}@db:5432/git_analysis
+      # Optional: set to override defaults (see .env.example for full list)
+      ONLINE_AI_ENABLED: ${ONLINE_AI_ENABLED:-false}
+      ONLINE_AI_API_KEY: ${ONLINE_AI_API_KEY:-}
+      ONLINE_AI_MODEL: ${ONLINE_AI_MODEL:-gpt-4o}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://localhost:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:14b}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Mount config.yaml so you can edit active repositories without rebuilding
+      - ./config.yaml:/app/config.yaml:ro
+
+volumes:
+  postgres_data:
