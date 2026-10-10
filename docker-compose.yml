@@ -2,13 +2,15 @@
 # docker-compose.yml — Git Analysis
 #
 # Services:
-#   db  — PostgreSQL 16 (stores PR, commit, and developer data)
-#   app — FastAPI backend + React frontend served on port 8000
+#   db      — PostgreSQL 16 (stores PR, commit, comment and developer data)
+#   app     — FastAPI backend + built React UI, both served on port 8000
+#   ollama  — optional local LLM, only started with `--profile ollama`
 #
 # Quick start:
-#   1. cp .env.example .env        # fill in GITHUB_TOKEN (DATABASE_URL is set automatically)
-#   2. docker compose up --build
-#   3. Open http://localhost:8000
+#   1. cp .env.example .env        # set GITHUB_TOKEN
+#   2. edit config.yaml            # list the repositories to analyse
+#   3. docker compose up --build
+#   4. open http://localhost:8000
 # =============================================================================
 
 services:
@@ -21,39 +23,59 @@ services:
       POSTGRES_DB: git_analysis
       POSTGRES_USER: git_user
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      # Published so you can also run the backend outside Docker against this DB.
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Sample data scripts: docker compose exec db psql -U git_user -d git_analysis -f /scripts/seed_data.sql
+      - ./scripts:/scripts:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U git_user -d git_analysis"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  # ─── Application ────────────────────────────────────────────────────────────
+  # ─── Application (API + UI) ─────────────────────────────────────────────────
   app:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8000}:8000"
+    # Everything in .env (GITHUB_TOKEN, AI settings, metric thresholds) is passed
+    # through; the entries under `environment` below take precedence.
+    env_file:
+      - path: .env
+        required: false
     environment:
-      # Override with a real token — required for GitHub data ingestion
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
-      # Automatically wired to the db service above
-      DATABASE_URL: postgresql://git_user:${POSTGRES_PASSWORD:-changeme}@db:5432/git_analysis
-      # Optional: set to override defaults (see .env.example for full list)
-      ONLINE_AI_ENABLED: ${ONLINE_AI_ENABLED:-false}
-      ONLINE_AI_API_KEY: ${ONLINE_AI_API_KEY:-}
-      ONLINE_AI_MODEL: ${ONLINE_AI_MODEL:-gpt-4o}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://localhost:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:14b}
+      # Always points at the db service above (overrides any local DATABASE_URL in .env).
+      DATABASE_URL: postgresql+psycopg2://git_user:${POSTGRES_PASSWORD:-changeme}@db:5432/git_analysis
+      # "localhost" inside the container is the container itself, so default to the
+      # Docker host. Use http://ollama:11434 with the `ollama` profile.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Makes host.docker.internal resolve on Linux too (built in on Docker Desktop).
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
     volumes:
       # Mount config.yaml so you can edit active repositories without rebuilding
+      # (restart the app container after editing).
       - ./config.yaml:/app/config.yaml:ro
+
+  # ─── Optional: local Ollama LLM ─────────────────────────────────────────────
+  # docker compose --profile ollama up --build
+  # docker compose exec ollama ollama pull qwen2.5-coder:7b
+  ollama:
+    image: ollama/ollama:0.12.6
+    profiles: ["ollama"]
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
 
 volumes:
   postgres_data:
+  ollama_data:

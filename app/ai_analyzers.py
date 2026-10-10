@@ -53,11 +53,17 @@ class BaseMetricsAnalyzer(abc.ABC):
 
 _SYSTEM_PROMPT = """You are a senior engineering analytics assistant that objectively reviews developer pull-request metrics.
 
-Analyze the provided PR descriptions and review comments specifically for:
+You receive aggregate PR metrics for one developer plus a sample of review comments that
+reviewers left on that developer's pull requests (with PR title and file path).
+
+Using ONLY that evidence, assess:
 1. Adherence to clean coding practices and language/framework idioms (score 1-10).
 2. Design patterns used or missing — identify architectural intent.
 3. DRY vs WET balance — flag copy-paste logic or over-abstraction.
-4. Reviewer engagement quality — depth of comments left on others' PRs (score 1-10).
+4. Review rigor — how thorough and substantive the review feedback on these PRs is (score 1-10).
+
+If the comment sample is empty or too small to support a judgement, say so explicitly in the
+text fields instead of guessing.
 
 Return ONLY valid JSON matching this exact schema (no prose, no markdown fences):
 {
@@ -79,7 +85,7 @@ def _build_user_message(
         {
             "developer": developer,
             "pr_metrics": pr_data,
-            "review_comments_sample": review_comments[:20],
+            "review_comments_sample": review_comments[:30],
         },
         default=str,
     )

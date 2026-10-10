@@ -994,8 +994,19 @@ export default function GitAnalyticsDashboard() {
         body: JSON.stringify({ lookback_days: Number(lookbackDays) || 7 }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        setError(data.detail ?? `Sync failed (${res.status}).`);
+        return;
+      }
       setSyncMessage(data.message ?? "Ingestion triggered.");
-      setTimeout(() => refreshData(), 3000);
+      // Poll until the background ingestion finishes, then reload the dashboard.
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const status = await apiFetch<{ status: string }>("/api/ingest/status");
+        if (status.status !== "running") break;
+      }
+      setSyncMessage("Sync complete.");
+      await refreshData();
     } catch {
       setError("Sync failed. Check backend logs.");
     } finally {

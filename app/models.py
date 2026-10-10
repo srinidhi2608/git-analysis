@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -30,6 +30,7 @@ class Repository(Base):
 
 class PullRequest(Base):
     __tablename__ = "pull_requests"
+    __table_args__ = (UniqueConstraint("repo_id", "pr_number", name="uq_pull_requests_repo_pr_number"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     repo_id: Mapped[int] = mapped_column(Integer, ForeignKey("repositories.id"), nullable=False)
@@ -61,6 +62,7 @@ class PullRequest(Base):
 
 class Commit(Base):
     __tablename__ = "commits"
+    __table_args__ = (UniqueConstraint("pr_id", "commit_hash", name="uq_commits_pr_commit_hash"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     pr_id: Mapped[int] = mapped_column(Integer, ForeignKey("pull_requests.id"), nullable=False)

@@ -1,8 +1,8 @@
 """Orchestrates GitHub data ingestion into the Postgres database.
 
 Calls GitHubIngestionService to fetch pull-request data for all active
-repositories, then upserts Developers, Repositories, PullRequests, and
-synthetic Commits into the database.
+repositories, then upserts Developers, Repositories, PullRequests, Commits
+and review comments into the database.
 """
 
 from __future__ import annotations
@@ -126,7 +126,6 @@ def run_ingestion(db: Session, lookback_days: int = 7) -> int:
             repo_name: str = pr_data["repository"]
             pr_number: int = pr_data["pr_number"]
             author: str | None = pr_data.get("author")
-            title: str | None = pr_data.get("title", ""),
 
             if not author:
                 logger.debug("PR #%s in %s has no author; skipping.", pr_number, repo_name)

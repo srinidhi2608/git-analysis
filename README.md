@@ -1,401 +1,439 @@
 # Git Analysis
 
-This project provides:
-- A FastAPI backend for Git analytics endpoints — fetches PR data from GitHub and stores it in PostgreSQL
-- A React dashboard at `frontend/src/components/GitAnalyticsDashboard.tsx` that reads **live data** from the backend
+**Git Analysis** is a self-hosted engineering-metrics dashboard built from GitHub pull-request data.
 
-## 1) Prerequisites
+It pulls PRs, reviews, review comments and commits for the repositories you choose from the GitHub GraphQL API, stores them in PostgreSQL, and shows them in a web dashboard:
 
-- Python 3.11+  
-- Node.js 18+ and npm  
-- PostgreSQL running locally or remotely  
-- GitHub Personal Access Token (PAT) with `repo` read access
+- **Team overview**: PR cycle time, merged PRs per week, and **DORA-inspired delivery metrics** (merge frequency, lead time, time to first review, review coverage, approval rate, change-failure proxy, recovery time) with weekly trends.
+- **Individual performance**: for each developer, PR size, review-comment density, requested-changes rate, rework after feedback, follow-up speed, recurring review themes, top reviewers and the languages they work in.
+- **AI summary (optional)**: written strengths, improvement areas, design-pattern and DRY/WET notes. These come from an online LLM (OpenAI or Gemini) or a local [Ollama](https://ollama.com) model, based on the actual review comments. A rule-based fallback always works, so no AI setup is required.
 
-## 2) Required properties to set **before start**
+> These metrics are signals to start a conversation, not a performance verdict. The AI and heuristic scores come from review comments and PR metadata only. They don't look at the code itself.
 
-Create `.env` in the project root directory (see `.env.example` for all options):
+---
 
-```env
-DATABASE_URL=postgresql://<db_user>:<db_password>@localhost:5432/git_analysis
-GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+## Contents
 
-# ── AI / LLM configuration ──────────────────────────────────────────────────
-# Tier 1 – Online AI (OpenAI-compatible, e.g. gpt-4o or gemini-1.5-pro)
-ONLINE_AI_ENABLED=false
-ONLINE_AI_API_KEY=
-ONLINE_AI_MODEL=gpt-4o
+1. [How it works](#1-how-it-works)
+2. [Quick start with Docker Compose (recommended)](#2-quick-start-with-docker-compose-recommended)
+3. [Configuration](#3-configuration)
+4. [Getting data into the dashboard](#4-getting-data-into-the-dashboard)
+5. [Running the API and UI separately (without Docker)](#5-running-the-api-and-ui-separately-without-docker)
+6. [AI analysis (optional)](#6-ai-analysis-optional)
+7. [API reference](#7-api-reference)
+8. [What the metrics mean](#8-what-the-metrics-mean)
+9. [Project layout](#9-project-layout)
+10. [Running the tests](#10-running-the-tests)
+11. [Troubleshooting](#11-troubleshooting)
 
-# Tier 2 – Local Ollama (see section 2.1 below)
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen2.5-coder:14b
+---
 
-# ── Metric thresholds (all have sensible defaults) ───────────────────────────
-# Uncomment and adjust as needed:
-# LARGE_PR_THRESHOLD_LINES=600
-# FOLLOWUP_GOOD_THRESHOLD_HOURS=12
-# REQUESTED_CHANGES_RISKY_PCT=30
-# HIGH_COMMENTS_PER_PR_THRESHOLD=2
-# LEAD_TIME_HEALTHY_HOURS=48
-# FIRST_REVIEW_HEALTHY_HOURS=24
-# REVIEW_COVERAGE_GOOD_PCT=80
-# APPROVAL_RATE_GOOD_PCT=60
-# CHANGE_FAILURE_ACCEPTABLE_PCT=35
-# CONFIDENCE_MIN_PRS=5
-# CONFIDENCE_MIN_COMMENTS=8
+## 1) How it works
+
+```
+config.yaml ──► GitHub GraphQL API ──► ingestion (POST /api/ingest) ──► PostgreSQL
+(repos)                                                                     │
+                                                                            ▼
+ Browser ◄── React dashboard ◄── FastAPI (/api/*) ◄── metrics, DORA proxies, developer analytics
+                                                        └─► AI summary: Online LLM → Ollama → rule-based
 ```
 
-Update `config.yaml` in the project root with repositories:
-
-```yaml
-repositories:
-  - name: "owner/repo-name"
-    is_active: true
-```
-
-Required property values:
-- `DATABASE_URL`: valid PostgreSQL SQLAlchemy connection string
-- `GITHUB_TOKEN`: PAT with access to read repository PR data
-- `repositories[].name`: must be in `owner/repo` format
-- `repositories[].is_active`: `true` to include repository in active list
-
-### Metric threshold reference
-
-| Variable | Default | Meaning |
+| Component | Technology | Where |
 |---|---|---|
-| `LARGE_PR_THRESHOLD_LINES` | `600` | Lines-changed above which a PR is flagged as large |
-| `FOLLOWUP_GOOD_THRESHOLD_HOURS` | `12` | Hours within which a review follow-up comment is considered prompt |
-| `REQUESTED_CHANGES_RISKY_PCT` | `30` | % of PRs with requested changes above which a developer is flagged |
-| `HIGH_COMMENTS_PER_PR_THRESHOLD` | `2` | Avg review comments per PR above which the trend indicator turns negative (flag for over-review or noise) |
-| `LEAD_TIME_HEALTHY_HOURS` | `48` | Max avg PR lead time (h) for a "healthy" DORA score |
-| `FIRST_REVIEW_HEALTHY_HOURS` | `24` | Max avg time-to-first-review (h) for a "healthy" indicator |
-| `REVIEW_COVERAGE_GOOD_PCT` | `80` | Min % of PRs reviewed for a "good" coverage indicator |
-| `APPROVAL_RATE_GOOD_PCT` | `60` | Min % of PRs approved for a "good" approval rate indicator |
-| `CHANGE_FAILURE_ACCEPTABLE_PCT` | `35` | Max % of PRs with requested changes for acceptable change-failure proxy |
-| `CONFIDENCE_MIN_PRS` | `5` | Minimum PRs required for medium confidence in analytics |
-| `CONFIDENCE_MIN_COMMENTS` | `8` | Minimum review comments required for medium confidence |
-| `CONFIDENCE_HIGH_PRS` | `8` | Minimum PRs required for high confidence in analytics |
-| `CONFIDENCE_HIGH_COMMENTS` | `15` | Minimum review comments required for high confidence |
+| API / backend | Python 3.11+, FastAPI, SQLAlchemy | `app/` |
+| Dashboard UI | React 19, TypeScript, Vite, Tailwind, Recharts | `frontend/` |
+| Database | PostgreSQL 16 | Docker volume `postgres_data` |
+| AI (optional) | OpenAI / Gemini API, or a local Ollama model | `app/ai_analyzers.py` |
 
-### 2.1 Configuring local Ollama (Tier 2 AI)
+In the Docker setup, one container serves **both the API and the built UI on port 8000**. During local development the UI runs on the Vite dev server (port 5173), which forwards `/api/*` requests to the backend.
 
-Ollama lets you run open-source LLMs on your own machine. When `ONLINE_AI_ENABLED=false` (the default) and Ollama is running, the app automatically uses it for developer metric analysis — no API key required.
+Database tables are created automatically when the backend starts. No migration step is needed.
 
-**Install Ollama**
+---
+
+## 2) Quick start with Docker Compose (recommended)
+
+You only need **Docker** (Docker Desktop, or Docker Engine 24+ with the Compose v2 plugin) and a **GitHub Personal Access Token**. You don't need Python, Node.js or PostgreSQL on your machine.
+
+### Step 1: Get the code
 
 ```bash
-# macOS / Linux
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Windows — download the installer from https://ollama.com/download
-```
-
-**Pull a model** (one-time download, ~8 GB for the default):
-
-```bash
-ollama pull qwen2.5-coder:14b
-```
-
-You can use a smaller model if disk space or RAM is limited:
-
-```bash
-ollama pull qwen2.5-coder:7b   # ~4 GB
-ollama pull codellama:7b        # ~4 GB
-```
-
-Then set the matching model name in `.env`:
-
-```env
-OLLAMA_MODEL=qwen2.5-coder:7b
-```
-
-**Start the Ollama server** (runs automatically after install on most systems):
-
-```bash
-ollama serve   # or: systemctl start ollama
-```
-
-Verify it is reachable:
-
-```bash
-curl http://localhost:11434/api/tags
-```
-
-The backend probes this endpoint on each analytics request and automatically falls back to the heuristic engine if Ollama is unreachable.
-
-**3-tier fallback summary**
-
-| Tier | Condition | Handler |
-|---|---|---|
-| 1 – Online AI | `ONLINE_AI_ENABLED=true` and `ONLINE_AI_API_KEY` is set | Calls OpenAI / Gemini API |
-| 2 – Local Ollama | Ollama `/api/tags` is reachable | Calls local model |
-| 3 – Heuristic | Always available | Rule-based scoring |
-
-## 3) Running with Docker (recommended)
-
-The easiest way to start the full application (PostgreSQL + backend + React UI) is with Docker Compose. No local Python, Node.js, or PostgreSQL installation is required.
-
-### 3.1 Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose) — version 24+ recommended
-- A GitHub Personal Access Token (PAT) with `repo` read access
-
-### 3.2 First-time setup
-
-```bash
-# 1. Clone the repository
 git clone https://github.com/srinidhi2608/git-analysis.git
 cd git-analysis
-
-# 2. Create your .env file from the example
-cp .env.example .env
-
-# 3. Open .env and set your GitHub token (the only required change)
-#    GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-#
-#    Optionally set a custom DB password (default: changeme):
-#    POSTGRES_PASSWORD=my-secure-password
-#
-#    All other settings have sensible defaults — see .env.example for details.
 ```
 
-Edit `config.yaml` to list the GitHub repositories you want to track:
+### Step 2: Create a GitHub token
+
+Create a token at <https://github.com/settings/tokens> with read access to the repositories you want to analyse:
+
+- **Classic token**: the `repo` scope (or `public_repo` if you only analyse public repositories).
+- **Fine-grained token**: repository permissions **Pull requests: Read** and **Contents: Read**.
+
+### Step 3: Create your `.env`
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and set your token:
+
+```env
+GITHUB_TOKEN=ghp_your_token_here
+```
+
+That's the only required change. Optionally change `POSTGRES_PASSWORD` too, but do it **before** the first start, because the database password is fixed when the database volume is first created.
+
+### Step 4: Choose the repositories to analyse
+
+Edit `config.yaml`:
 
 ```yaml
 repositories:
-  - name: "your-org/your-repo"
+  - name: "your-org/your-repo"     # owner/repo format
+    is_active: true
+  - name: "your-org/another-repo"
     is_active: true
 ```
 
-### 3.3 Build and start
+### Step 5: Build and start
 
 ```bash
 docker compose up --build
 ```
 
-This command:
-1. Builds the React frontend (Node 20 + Vite)
-2. Builds the Python backend (Python 3.11 + FastAPI/uvicorn)
-3. Starts a PostgreSQL 16 container with a persistent volume
-4. Creates all database tables automatically on first start
+This will:
 
-Open **http://localhost:8000** — the React dashboard and the API are served from the same port.
+1. Build the React UI (Node 22) and the Python backend (Python 3.12) into one image.
+2. Start PostgreSQL 16 with a persistent volume.
+3. Start the app once the database is healthy, and create the tables.
 
-> **Note:** The first build takes a few minutes because it downloads base images and installs dependencies. Subsequent starts (without `--build`) are near-instant.
+The first build takes a few minutes. When you see `Uvicorn running on http://0.0.0.0:8000`, open:
 
-### 3.4 Everyday use
+| What | URL |
+|---|---|
+| **Dashboard (UI)** | <http://localhost:8000> |
+| **Interactive API docs (Swagger)** | <http://localhost:8000/docs> |
+| Health check | <http://localhost:8000/health> |
+
+### Step 6: Load data
+
+The dashboard starts empty. Click **⟳ Sync from GitHub** in the header. The button stays in "Syncing…" until ingestion finishes, then the dashboard reloads. Use the **Lookback** field to choose how many days of PR activity to import (for example 30 or 90 for a first import).
+
+Just want to look around? [Load the sample data](#43-load-sample-demo-data) instead.
+
+### Everyday commands
 
 | Goal | Command |
 |---|---|
-| Start (after first build) | `docker compose up` |
-| Start in background | `docker compose up -d` |
+| Start in the background | `docker compose up -d` |
+| Follow the app logs | `docker compose logs -f app` |
 | Stop | `docker compose down` |
-| Stop and delete DB data | `docker compose down -v` |
-| Rebuild after code change | `docker compose up --build` |
-| View logs | `docker compose logs -f app` |
-| Open a DB shell | `docker compose exec db psql -U git_user git_analysis` |
+| Stop **and delete all data** | `docker compose down -v` |
+| Rebuild after pulling new code | `docker compose up --build -d` |
+| Apply `config.yaml` changes | `docker compose restart app` |
+| Open a database shell | `docker compose exec db psql -U git_user -d git_analysis` |
 
-### 3.5 Loading sample data (optional)
+Ports can be changed in `.env` with `APP_PORT` (default `8000`) and `POSTGRES_PORT` (default `5432`) if they are already in use on your machine.
 
-```bash
-# Seed 3 developers, 10 PRs, and 45 review comments for local demos:
-docker compose exec db psql -U git_user git_analysis -f /dev/stdin < scripts/seed_data.sql
+---
 
-# Clear all data and re-seed:
-docker compose exec db psql -U git_user git_analysis -f /dev/stdin < scripts/clear_data.sql
-docker compose exec db psql -U git_user git_analysis -f /dev/stdin < scripts/seed_data.sql
-```
+## 3) Configuration
 
-### 3.6 Using a local Ollama model inside Docker
+### 3.1 `.env`
 
-If you want the Tier-2 LLM to call a locally running Ollama instance from inside the Docker container, point `OLLAMA_BASE_URL` at the Docker host:
+All settings are environment variables. The backend reads them from `.env` in the project root (when run directly) or from the container environment (Docker Compose passes `.env` through). See [`.env.example`](.env.example) for the full annotated list.
 
-```env
-# Linux
-OLLAMA_BASE_URL=http://172.17.0.1:11434
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `GITHUB_TOKEN` | **yes** | – | GitHub PAT used for ingestion |
+| `DATABASE_URL` | yes (non-Docker) | – | SQLAlchemy URL, e.g. `postgresql+psycopg2://git_user:changeme@localhost:5432/git_analysis`. Docker Compose sets this automatically for the app container |
+| `POSTGRES_PASSWORD` | no | `changeme` | Password of the Compose PostgreSQL container |
+| `APP_PORT` / `POSTGRES_PORT` | no | `8000` / `5432` | Host ports published by Docker Compose |
+| `ONLINE_AI_ENABLED` | no | `false` | Enable the online LLM (tier 1) |
+| `ONLINE_AI_API_KEY` | no | – | API key for OpenAI or Google Gemini |
+| `ONLINE_AI_MODEL` | no | `gemini-1.5-pro` | Model name. `gemini-*` uses Google's OpenAI-compatible endpoint, anything else uses OpenAI |
+| `OLLAMA_BASE_URL` | no | `http://localhost:11434` (local) / `http://host.docker.internal:11434` (Compose) | Ollama server (tier 2) |
+| `OLLAMA_MODEL` | no | `qwen2.5-coder:14b` | Ollama model name |
+| `DEVELOPER_ANALYTICS_AI_URL` / `_TOKEN` / `_MODEL` | no | – | Optional OpenAI-compatible chat-completions endpoint for the developer *overview narrative*. If unset, a rule-based narrative is used |
 
-# macOS / Windows Docker Desktop
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-```
+### 3.2 Metric thresholds
 
-## 4) Backend setup and start commands (without Docker)
+These tune scoring and the red/green indicators on the dashboard. All are optional.
 
-From the project root directory:
+| Variable | Default | Meaning |
+|---|---|---|
+| `LARGE_PR_THRESHOLD_LINES` | `600` | Lines changed (additions + deletions) at which a PR counts as large |
+| `FOLLOWUP_GOOD_THRESHOLD_HOURS` | `12` | Hours within which a follow-up commit after review feedback counts as prompt |
+| `REQUESTED_CHANGES_RISKY_PCT` | `30` | % of PRs with requested changes above which a developer is flagged |
+| `HIGH_COMMENTS_PER_PR_THRESHOLD` | `2` | Avg review comments per PR above which the trend indicator turns negative |
+| `LEAD_TIME_HEALTHY_HOURS` | `48` | Max avg PR lead time (h) shown as healthy |
+| `FIRST_REVIEW_HEALTHY_HOURS` | `24` | Max avg time to first review (h) shown as healthy |
+| `REVIEW_COVERAGE_GOOD_PCT` | `80` | Min % of PRs reviewed shown as good |
+| `APPROVAL_RATE_GOOD_PCT` | `60` | Min % of reviewed PRs approved shown as good |
+| `CHANGE_FAILURE_ACCEPTABLE_PCT` | `35` | Max % of merged PRs with requested changes shown as acceptable |
+| `CONFIDENCE_MIN_PRS` / `CONFIDENCE_MIN_COMMENTS` | `5` / `8` | PRs / review comments needed for *medium* analytics confidence |
+| `CONFIDENCE_HIGH_PRS` / `CONFIDENCE_HIGH_COMMENTS` | `8` / `15` | PRs / review comments needed for *high* analytics confidence |
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+### 3.3 `config.yaml`
 
-Backend starts at `http://localhost:8000`.  
-Database tables are created automatically on first start.
+Lists the repositories to ingest. Only entries with `is_active: true` are fetched. Restart the backend after editing (`docker compose restart app` in Docker).
 
-### 3.1 PostgreSQL note for existing databases
+---
 
-No manual DB step is required for a fresh setup. On startup, the app creates missing tables and adds missing columns automatically.
+## 4) Getting data into the dashboard
 
-If you are upgrading an existing PostgreSQL database, first pull the latest code and restart the backend. The schema bootstrap now uses PostgreSQL-compatible timestamp types.
+### 4.1 Sync from GitHub (UI)
 
-If startup previously failed on an older build with an error like `type "datetime" does not exist`, you normally do **not** need to change data manually; just restart with the updated code.
+Click **⟳ Sync from GitHub**. Ingestion imports every PR (open, closed or merged) that was **updated within the Lookback window**, for all active repositories. That includes its reviews, review comments, PR comments and commits. Re-running is safe: existing rows are updated, never duplicated. Only one sync runs at a time; a second request while one is running gets `409 Conflict`.
 
-If you prefer to patch an existing database manually before restarting, run:
+### 4.2 Sync from the command line
 
-```sql
-ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS first_review_comment_at TIMESTAMP NULL;
-ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS last_review_comment_at TIMESTAMP NULL;
-ALTER TABLE commits ADD COLUMN IF NOT EXISTS committed_at TIMESTAMP NULL;
-```
-
-You can also verify the added columns with:
-
-```sql
-SELECT column_name, data_type
-FROM information_schema.columns
-WHERE table_name IN ('pull_requests', 'commits')
-ORDER BY table_name, ordinal_position;
-```
-
-## 5) Backend endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Health check |
-| GET | `/docs` | Swagger UI |
-| GET | `/active-repositories` | Lists active repos from `config.yaml` |
-| GET | `/api/team-performance` | Team-level PR metrics (last 30 days) |
-| GET | `/api/dora/team` | Team-level DORA-inspired GitHub delivery metrics and weekly trends |
-| GET | `/api/developers` | List all known developers |
-| GET | `/api/developers/{username}` | Metrics for a specific developer |
-| GET | `/api/developers/{username}/analytics` | Saved PR review analytics + AI/heuristic summary for a developer |
-| GET | `/api/developers/{username}/dora` | Individual DORA-inspired GitHub delivery metrics and weekly trends |
-| GET | `/api/config/thresholds` | Returns the active metric threshold values (sourced from `.env`) |
-| GET | `/api/chart/pr-cycle-by-developer` | Avg cycle time per developer (for bar chart) |
-| GET | `/api/chart/prs-per-week` | PRs merged per ISO week (for line chart); accepts optional `?developer=<username>` |
-| POST | `/api/ingest` | Triggers GitHub data fetch and saves PRs to Postgres (runs in background) |
-
-## 6) Triggering data ingestion
-
-Data is fetched from the GitHub GraphQL API using the PAT in `.env`.  
-You can trigger ingestion two ways:
-
-**From the UI** — click the **⟳ Sync from GitHub** button in the dashboard header. The dashboard includes a **Lookback** field that sends the requested number of days to the backend.
-
-**From the command line / curl:**
 ```bash
 curl -X POST http://localhost:8000/api/ingest \
   -H "Content-Type: application/json" \
   -d '{"lookback_days": 30}'
+
+# Poll until it reports "idle"
+curl http://localhost:8000/api/ingest/status
 ```
 
-Ingestion fetches closed/merged PRs for the selected lookback window (default: 7 days) for all active repositories and upserts them into Postgres.
-Saved pull request records now also capture:
-- PR/review comment text and timestamps
-- Review decisions / requested-changes signals
-- Changed-file and diff-size metadata
-- Commit timestamps used for review follow-up estimates
+Ingestion progress and errors (for example an invalid token) are printed in the backend logs (`docker compose logs -f app`).
 
-## 7) Dashboard UI setup
+### 4.3 Load sample (demo) data
 
-### 6.1 Install frontend dependencies
+`scripts/seed_data.sql` inserts 3 developers, 1 repository, 10 PRs, 30 commits and 45 review comments. Timestamps are moved so the data falls in the last few weeks and shows up on every chart. The backend must have started at least once, so the tables exist.
 
-From the project root:
+```bash
+# Docker Compose
+docker compose exec db psql -U git_user -d git_analysis -f /scripts/seed_data.sql
+
+# Your own PostgreSQL
+psql "postgresql://git_user:changeme@localhost:5432/git_analysis" -f scripts/seed_data.sql
+```
+
+To wipe **all** data (sample and synced) and start clean:
+
+```bash
+docker compose exec db psql -U git_user -d git_analysis -f /scripts/clear_data.sql
+```
+
+Then refresh the dashboard (**↺ Refresh**).
+
+---
+
+## 5) Running the API and UI separately (without Docker)
+
+Use this for development, or if you prefer not to run the app in Docker. You need:
+
+- **Python 3.11+**
+- **Node.js 20.19+ or 22.12+** with npm
+- **PostgreSQL 14+** (local install, or just the Compose database: see 5.1)
+
+All commands below run from the project root unless noted.
+
+### 5.1 Start PostgreSQL
+
+**Option A: the Compose database only** (easiest)
+
+```bash
+docker compose up -d db
+```
+
+The default `DATABASE_URL` in `.env.example` already points at it: `postgresql+psycopg2://git_user:changeme@localhost:5432/git_analysis`.
+
+**Option B: your own PostgreSQL**
+
+```bash
+psql -U postgres -c "CREATE USER git_user WITH PASSWORD 'changeme';"
+psql -U postgres -c "CREATE DATABASE git_analysis OWNER git_user;"
+```
+
+Then set `DATABASE_URL` in `.env` to match.
+
+### 5.2 Configure
+
+```bash
+cp .env.example .env      # set GITHUB_TOKEN (and DATABASE_URL if you used option B)
+# edit config.yaml to list your repositories
+```
+
+### 5.3 Start the API (backend)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+The API is now at <http://localhost:8000> (Swagger docs at <http://localhost:8000/docs>). Tables are created on startup.
+
+### 5.4 Start the UI (frontend), in a second terminal
 
 ```bash
 cd frontend
 npm install
-```
-
-### 6.2 Start the React app
-
-```bash
 npm run dev
 ```
 
-Open `http://localhost:5173` (or the URL shown in terminal).
+Open <http://localhost:5173>. The Vite dev server forwards `/api/*` to `http://localhost:8000`. If your backend runs elsewhere, set `VITE_API_PROXY_TARGET`, e.g. `VITE_API_PROXY_TARGET=http://localhost:9000 npm run dev`.
 
-> The Vite dev server proxies `/api/*` requests to the backend at `http://localhost:8000`, so no CORS configuration is needed during development.
-
-### 6.3 What to verify on screen
-
-1. Page loads with title: **Engineering Performance Dashboard**
-2. Header shows two buttons: **⟳ Sync from GitHub** and **↺ Refresh**
-3. Two tabs are visible: **Team Overview** and **Individual Performance**
-4. On first load with an empty database, charts show an empty-state message prompting you to sync
-5. Click **⟳ Sync from GitHub** — a green status message confirms ingestion has started
-6. After a few seconds, click **↺ Refresh** — charts and KPI cards populate with real GitHub data
-7. **Team Overview** tab:
-   - 3 KPI cards: Active Developers, Avg PR Cycle Time, PRs Merged (30d)
-   - Bar chart: **Average PR Cycle Time by Developer**
-   - Line chart: **Total PRs Merged per Week**
-8. **Individual Performance** tab:
-   - Developer dropdown to select a specific GitHub user
-   - KPI cards update for the selected developer
-   - Charts filter to show that developer's data only
-   - **Four inner tabs** organise the detail views:
-     - **Summary** — AI-generated or heuristic overall highlights, strengths, and improvement areas; detected programming languages shown as tags
-     - **DORA Metrics** — individual DORA-inspired GitHub delivery section: merge frequency, lead time, review coverage, approval rate, and change-failure proxy trend
-     - **AI Metrics** — grounded summary, coding standards score, DRY/WET observations, reviewer rigor score, and comment-theme breakdown
-     - **Reviewers** — list of reviewers ranked by number of review comments left on the developer's PRs
-9. Hover over chart points/bars — tooltips appear
-
-## 8) DORA-inspired GitHub metrics added to the dashboard
-
-The app now includes a GitHub-native interpretation of DORA software delivery ideas. Because this project currently analyzes pull requests, reviews, comments, and commits — not production deploys or incident systems — the dashboard uses **proxies** that fit GitHub data.
-
-### Team-level and individual-level metrics
-
-- **Merge Frequency**  
-  Proxy for deployment frequency. Calculated as merged PRs per week over the dashboard window.
-
-- **Average Lead Time**  
-  Proxy for lead time for changes. Calculated from PR creation to merge time.
-
-- **Median Lead Time (P50)**  
-  Median PR lead time, used to reduce outlier distortion when a few PRs stay open much longer than the rest.
-
-- **Time to First Review**  
-  Measures how long a PR waits before the first saved review feedback appears. Useful for identifying review-queue bottlenecks.
-
-- **Review Coverage Rate**  
-  Percentage of PRs that received recorded review activity or review comments.
-
-- **Approval Rate**  
-  Percentage of reviewed PRs that received at least one approval.
-
-- **Change Failure Proxy Rate**  
-  GitHub-specific quality proxy for DORA change failure rate. Calculated as the percentage of merged PRs in the window that received requested changes during review.
-
-- **Average Recovery Time After Review Feedback**  
-  GitHub-specific recovery proxy inspired by MTTR. Calculated as the average time from the last saved review feedback to merge for PRs that had requested changes.
-
-### Important note
-
-These are **DORA-inspired engineering workflow metrics**, not exact production DORA metrics. True deployment frequency, change failure rate, and mean time to restore service require deployment and incident data that is outside the current GitHub-only dataset.
-
-## 9) Sample seed data
-
-The `scripts/` directory contains SQL files for local development and demos.
-
-### Load sample data
-
-Seeds 3 developers, 1 repository, 10 pull requests, 30 commits, and 45 review comments (multiple comments per PR covering realistic code-review conversations):
+### 5.5 Optional: serve the built UI from the backend (single port)
 
 ```bash
-psql $DATABASE_URL -f scripts/seed_data.sql
+cd frontend && npm run build && cd ..
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-The script is idempotent — it uses `ON CONFLICT DO NOTHING / DO UPDATE` guards, so running it twice is safe. To reset to a completely clean state first:
+When `frontend/dist` exists, FastAPI serves the dashboard at <http://localhost:8000>, which is exactly what the Docker image does.
+
+---
+
+## 6) AI analysis (optional)
+
+The developer **Summary** and **AI Metrics** tabs are enriched by an analyzer with three tiers. Each tier falls back to the next on failure:
+
+| Tier | Used when | Handler |
+|---|---|---|
+| 1. Online AI | `ONLINE_AI_ENABLED=true` and `ONLINE_AI_API_KEY` set | OpenAI or Gemini (OpenAI-compatible chat API) |
+| 2. Local Ollama | Ollama answers at `OLLAMA_BASE_URL` | Local model |
+| 3. Rule-based | Always | Deterministic heuristics |
+
+The LLM receives the developer's aggregate metrics plus a sample of up to 30 review comments (truncated) that reviewers left on their PRs. **With tier 1 enabled, that text is sent to the external provider**, so only enable it if that's acceptable for your repositories.
+
+### Online AI (tier 1)
+
+```env
+ONLINE_AI_ENABLED=true
+ONLINE_AI_API_KEY=sk-...         # OpenAI key, or a Google AI Studio key for Gemini
+ONLINE_AI_MODEL=gpt-4o           # or gemini-1.5-pro
+```
+
+### Ollama running on your machine (tier 2)
 
 ```bash
-psql $DATABASE_URL -f scripts/clear_data.sql
-psql $DATABASE_URL -f scripts/seed_data.sql
+# Install: https://ollama.com/download  (macOS/Linux: curl -fsSL https://ollama.com/install.sh | sh)
+ollama pull qwen2.5-coder:7b     # ~4 GB; qwen2.5-coder:14b (~8 GB) is the default model
+ollama serve                     # usually already running after install
+curl http://localhost:11434/api/tags   # check it is reachable
 ```
 
-### Clear all data
+Set `OLLAMA_MODEL=qwen2.5-coder:7b` in `.env` if you pulled a different model than the default.
+
+- **Backend run directly**: works with the default `OLLAMA_BASE_URL` (`http://localhost:11434`).
+- **Backend in Docker Compose**: the container reaches your machine at `http://host.docker.internal:11434` (the Compose default). On Linux, Ollama must listen on all interfaces: start it with `OLLAMA_HOST=0.0.0.0 ollama serve`.
+
+### Ollama inside Docker Compose
 
 ```bash
-psql $DATABASE_URL -f scripts/clear_data.sql
+# in .env:  OLLAMA_BASE_URL=http://ollama:11434   and   OLLAMA_MODEL=qwen2.5-coder:7b
+docker compose --profile ollama up --build -d
+docker compose exec ollama ollama pull qwen2.5-coder:7b
 ```
 
-This truncates all application tables and resets identity sequences. It is also safe to run multiple times.
+Running a model on CPU is slow, and a request taking more than 60 s falls back to the rule-based analyzer. The backend log says which tier was used, e.g. `Developer metrics analyzed via LocalOllamaHandler for alice` or `Ollama is not reachable at ...`. (The **Provider** badge on the developer card refers to the overview narrative, which stays `heuristic-fallback` unless `DEVELOPER_ANALYTICS_AI_URL` is configured.)
+
+---
+
+## 7) API reference
+
+Full interactive documentation: **<http://localhost:8000/docs>**.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Health check |
+| GET | `/active-repositories` | Active repositories from `config.yaml` |
+| GET | `/api/config/thresholds` | Active metric thresholds |
+| GET | `/api/team-performance` | Team-level PR metrics (PRs created in the last 30 days) |
+| GET | `/api/dora/team` | Team DORA-inspired metrics (30 days) + 8-week trends |
+| GET | `/api/developers` | All known developers |
+| GET | `/api/developers/{username}` | Aggregate metrics for one developer |
+| GET | `/api/developers/{username}/analytics` | Review analytics + AI/heuristic summary for one developer |
+| GET | `/api/developers/{username}/dora` | DORA-inspired metrics for one developer |
+| GET | `/api/chart/pr-cycle-by-developer` | Avg cycle time per developer (30 days) |
+| GET | `/api/chart/prs-per-week` | Merged PRs per ISO week (6 weeks); optional `?developer=<username>` |
+| POST | `/api/ingest` | Start a GitHub sync in the background. Body: `{"lookback_days": 7}`. Returns `202`, or `409` if one is already running |
+| GET | `/api/ingest/status` | `running` or `idle` |
+
+> **Security note:** the API has **no authentication**. Anyone who can reach the port can read the metrics and trigger syncs (which use your GitHub token's rate limit). Run it on a trusted network or behind an authenticating reverse proxy.
+
+---
+
+## 8) What the metrics mean
+
+This project only sees GitHub data (PRs, reviews, comments, commits), not deployments or incidents. So the delivery metrics are **GitHub-based proxies inspired by DORA**, not real DORA metrics.
+
+| Metric | How it is calculated |
+|---|---|
+| **Merge frequency** | Merged PRs per week in the window (proxy for deployment frequency) |
+| **Lead time (avg / median)** | PR created → merged |
+| **Time to first review** | PR created → first review feedback from someone other than the author |
+| **Review coverage** | % of PRs with at least one review or review comment |
+| **Approval rate** | % of reviewed PRs with at least one approval |
+| **Change-failure proxy** | % of merged PRs that received a "changes requested" review |
+| **Recovery time** | For PRs with requested changes: last review feedback → merge |
+| **Rework after feedback** | Commits pushed after the first review feedback |
+| **First follow-up** | First review feedback → the author's next commit |
+| **Comment themes** | Review comments sorted into style / correctness / testing / maintainability / performance / security by keyword |
+| **Languages** | Taken from the file extensions of commented files |
+
+Team metrics use PRs **created** in the last 30 days. Developer analytics use all stored PRs for that developer.
+
+---
+
+## 9) Project layout
+
+```
+app/
+  main.py               FastAPI app: routes, background ingestion, SPA serving
+  config.py             Settings (environment / .env)
+  config_loader.py      Reads config.yaml
+  database.py           Engine/session, automatic table + column + index creation
+  models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
+  github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
+  ingest.py             Upserts fetched data into PostgreSQL
+  queries.py            Team / developer / chart queries
+  dora_metrics.py       DORA-inspired metrics and weekly trends
+  developer_analytics.py  Per-developer review analytics + narrative
+  ai_analyzers.py       Online LLM → Ollama → rule-based analyzer
+frontend/               React + Vite dashboard (src/components/GitAnalyticsDashboard.tsx)
+scripts/                seed_data.sql (demo data), clear_data.sql (wipe data)
+tests/                  Backend unit tests
+config.yaml             Repositories to analyse
+Dockerfile              Multi-stage build: UI (Node) + API (Python) in one image
+docker-compose.yml      PostgreSQL + app (+ optional Ollama)
+```
+
+---
+
+## 10) Running the tests
+
+The backend tests use an in-memory SQLite database and need no PostgreSQL, GitHub token or LLM:
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -s tests -v
+```
+
+Frontend type-check, lint and production build:
+
+```bash
+cd frontend
+npm run lint
+npm run build
+```
+
+---
+
+## 11) Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Dashboard is empty | Click **⟳ Sync from GitHub**, or [load the sample data](#43-load-sample-demo-data). Check `config.yaml` lists the right repositories |
+| Sync finishes but nothing appears | Check `docker compose logs app`. *"GitHub rejected the request (401/403)"* means the token is invalid or lacks access to the repository. Also try a bigger Lookback: only PRs updated in that window are imported |
+| App container exits with a `github_token` / `database_url` "Field required" error | `GITHUB_TOKEN` is missing from `.env` (or `DATABASE_URL` when running without Docker) |
+| `password authentication failed` after changing `POSTGRES_PASSWORD` | The password is fixed when the volume is first created. Run `docker compose down -v` (deletes data), then start again |
+| `port is already allocated` | Set `APP_PORT` or `POSTGRES_PORT` in `.env` |
+| `Could not create unique index ...` warning on startup | An older version stored duplicate PRs. Run `scripts/clear_data.sql` and sync again |
+| Logs say `Ollama is not reachable` | See [AI analysis](#6-ai-analysis-optional). From Docker, Ollama on the host must be reachable at `host.docker.internal:11434` (on Linux start it with `OLLAMA_HOST=0.0.0.0`) |
+| UI on port 5173 shows "Failed to load data" | The backend isn't running on port 8000, or set `VITE_API_PROXY_TARGET` |

@@ -1,9 +1,7 @@
 import logging
-import os
+import threading
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,9 +24,11 @@ from app.queries import (
 )
 from app.ingest import run_ingestion
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 active_repos: list = []
+# Only one ingestion may run at a time; concurrent runs would race on upserts.
+_ingestion_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Pydantic response models
@@ -220,7 +220,7 @@ app = FastAPI(title="Git Analysis API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -250,6 +250,8 @@ def get_thresholds():
         "change_failure_acceptable_pct": settings.change_failure_acceptable_pct,
         "confidence_min_prs": settings.confidence_min_prs,
         "confidence_min_comments": settings.confidence_min_comments,
+        "confidence_high_prs": settings.confidence_high_prs,
+        "confidence_high_comments": settings.confidence_high_comments,
     }
 
 
@@ -308,7 +310,10 @@ def chart_prs_per_week(db: Session = Depends(get_db), developer: str | None = No
 
 
 def _background_ingest(lookback_days: int = 7):
-    """Run ingestion in a background thread with its own DB session."""
+    """Run ingestion in a background thread with its own DB session.
+
+    The caller must hold ``_ingestion_lock``; it is released when the run ends.
+    """
     db = SessionLocal()
     try:
         run_ingestion(db, lookback_days=lookback_days)
@@ -316,9 +321,18 @@ def _background_ingest(lookback_days: int = 7):
         logger.exception("Background ingestion failed.")
     finally:
         db.close()
+        _ingestion_lock.release()
 
 
-@app.post("/api/ingest", response_model=IngestStatusResponse)
+@app.get("/api/ingest/status", response_model=IngestStatusResponse)
+def ingest_status():
+    """Report whether a GitHub ingestion run is currently in progress."""
+    if _ingestion_lock.locked():
+        return IngestStatusResponse(status="running", message="Ingestion is in progress.")
+    return IngestStatusResponse(status="idle", message="No ingestion is running.")
+
+
+@app.post("/api/ingest", response_model=IngestStatusResponse, status_code=202)
 def trigger_ingest(
     background_tasks: BackgroundTasks,
     payload: IngestRequest = Body(default_factory=IngestRequest),
@@ -326,11 +340,13 @@ def trigger_ingest(
     """Trigger GitHub data ingestion into Postgres (runs in background)."""
     if payload.lookback_days < 1:
         raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
+    if not _ingestion_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="An ingestion run is already in progress.")
 
     background_tasks.add_task(_background_ingest, payload.lookback_days)
     return IngestStatusResponse(
         status="accepted",
-        message=f"Ingestion started in the background for the last {payload.lookback_days} days. Refresh data in a few seconds.",
+        message=f"Ingestion started in the background for PRs updated in the last {payload.lookback_days} days.",
     )
 
 
@@ -350,5 +366,10 @@ if _FRONTEND_DIST.is_dir():
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
         """Return index.html for any path not matched by an API route."""
-        index = _FRONTEND_DIST / "index.html"
-        return FileResponse(str(index))
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        # Serve real files from the build root (favicon.svg, icons.svg, ...).
+        candidate = (_FRONTEND_DIST / full_path).resolve()
+        if full_path and candidate.is_file() and candidate.is_relative_to(_FRONTEND_DIST.resolve()):
+            return FileResponse(str(candidate))
+        return FileResponse(str(_FRONTEND_DIST / "index.html"))

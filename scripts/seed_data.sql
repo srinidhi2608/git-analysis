@@ -5,6 +5,9 @@
 -- run this script standalone — it skips any row that already exists.
 -- Covers 3 developers, 1 shared repository, 10 pull requests, commits, and
 -- review comments (multiple per PR).
+-- The sample timestamps are shifted at the end so the newest PR is merged
+-- yesterday, keeping the data inside the dashboard's 30-day windows.
+-- Requires the application tables: start the backend once before running it.
 -- =============================================================================
 
 -- ─── Developers ──────────────────────────────────────────────────────────────
@@ -107,7 +110,7 @@ SELECT
 FROM commits_seed cs
 JOIN developers d ON d.github_username = cs.developer
 JOIN pull_requests p ON p.pr_number = cs.pr_number::int AND p.developer_id = d.id
-ON CONFLICT (commit_hash) DO NOTHING;
+ON CONFLICT (pr_id, commit_hash) DO NOTHING;
 
 -- ─── Review Comments ─────────────────────────────────────────────────────────
 WITH comments_seed (pr_number, pr_developer, external_id, comment_type, author_login, body, path, review_state, created_at) AS (
@@ -182,3 +185,37 @@ FROM comments_seed cs
 JOIN developers dev ON dev.github_username = cs.pr_developer
 JOIN pull_requests p ON p.pr_number = cs.pr_number::int AND p.developer_id = dev.id
 ON CONFLICT (external_id) DO NOTHING;
+
+-- ─── Shift sample timestamps to be recent ────────────────────────────────────
+-- Moves every timestamp of the sample repository so the latest merge lands
+-- one day ago. Re-running computes a ~zero shift, so this stays idempotent.
+DO $$
+DECLARE
+  seed_repo_id integer;
+  shift interval;
+BEGIN
+  SELECT id INTO seed_repo_id FROM repositories WHERE name = 'acme-corp/platform';
+  SELECT date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '1 day' - max(merged_at)
+    INTO shift
+    FROM pull_requests WHERE repo_id = seed_repo_id;
+  IF shift IS NULL OR shift < interval '1 hour' THEN
+    RETURN;
+  END IF;
+
+  UPDATE pull_requests
+     SET created_at = created_at + shift,
+         merged_at = merged_at + shift,
+         first_review_comment_at = first_review_comment_at + shift,
+         last_review_comment_at = last_review_comment_at + shift
+   WHERE repo_id = seed_repo_id;
+
+  UPDATE commits c
+     SET committed_at = c.committed_at + shift
+    FROM pull_requests p
+   WHERE c.pr_id = p.id AND p.repo_id = seed_repo_id;
+
+  UPDATE pull_request_comments pc
+     SET created_at = pc.created_at + shift
+    FROM pull_requests p
+   WHERE pc.pr_id = p.id AND p.repo_id = seed_repo_id;
+END $$;

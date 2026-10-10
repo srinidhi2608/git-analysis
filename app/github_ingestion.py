@@ -1,7 +1,8 @@
 """GitHub GraphQL ingestion service.
 
-Fetches closed Pull Requests from the GitHub GraphQL API for each active
-repository listed in config.yaml, covering the last 7 days.
+Fetches Pull Requests (open, closed and merged) from the GitHub GraphQL API
+for each active repository listed in config.yaml, limited to PRs that had
+activity (were updated) within the lookback window.
 """
 
 from __future__ import annotations
@@ -18,14 +19,11 @@ from app.config_loader import load_active_repositories
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 
 # GraphQL query: paginate PR shells first to avoid GitHub's nested-node limit.
+# Ordered by most recently updated so pagination can stop at the lookback cutoff.
 PR_LIST_QUERY = """
 query($owner: String!, $repo: String!, $after: String) {
   repository(owner: $owner, name: $repo) {
@@ -33,6 +31,7 @@ query($owner: String!, $repo: String!, $after: String) {
       states: [CLOSED, MERGED, OPEN]
       first: 100
       after: $after
+      orderBy: {field: UPDATED_AT, direction: DESC}
     ) {
       pageInfo {
         hasNextPage
@@ -40,8 +39,7 @@ query($owner: String!, $repo: String!, $after: String) {
       }
       nodes {
         number
-        mergedAt
-        closedAt
+        updatedAt
       }
     }
   }
@@ -153,9 +151,6 @@ class GitHubIngestionService:
             logger.info("Fetching PRs for %s", repo_name)
             prs = self._fetch_repo_prs(owner, name)
             logger.info("Fetched %d PRs for %s", len(prs), repo_name)
-            #display pr title 
-            for pr in prs:
-                logger.info("PR title: %s", pr.get("title", ""))
             results.extend(prs)
         return results
 
@@ -180,22 +175,23 @@ class GitHubIngestionService:
             page_info: dict = pr_connection["pageInfo"]
 
             recent_pr_numbers: list[int] = []
+            reached_cutoff = False
             for node in nodes:
-                # Use mergedAt if available, otherwise closedAt, to determine recency.
-                relevant_date_str: str | None = node.get("mergedAt") or node.get("closedAt") or node.get("createdAt")
-                if not relevant_date_str:
+                updated_at_str: str | None = node.get("updatedAt")
+                if not updated_at_str:
                     continue
-                relevant_date = datetime.fromisoformat(relevant_date_str.replace("Z", "+00:00"))
-                # Filter client-side: ordering by UPDATED_AT means we cannot stop
-                # pagination early based on mergedAt/closedAt alone.
-                if relevant_date >= since:
-                    recent_pr_numbers.append(node["number"])
+                updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+                if updated_at < since:
+                    # Results are ordered by updatedAt DESC, so every later PR is older too.
+                    reached_cutoff = True
+                    break
+                recent_pr_numbers.append(node["number"])
 
             for pr_number_batch in self._chunked(recent_pr_numbers, DETAIL_BATCH_SIZE):
                 for detailed_node in self._fetch_pr_details_batch(owner, repo, pr_number_batch):
                     prs.append(self._normalize_pr(owner, repo, detailed_node))
 
-            if not page_info["hasNextPage"]:
+            if reached_cutoff or not page_info["hasNextPage"]:
                 break
             cursor = page_info["endCursor"]
 
@@ -408,9 +404,9 @@ query({", ".join(variable_definitions)}) {{
                     raise RuntimeError(f"GitHub GraphQL errors: {errors}")
                 return payload
 
-            if response.status_code == 403:
-                # Primary rate limit: Retry-After header tells us when to resume.
-                retry_after = int(response.headers.get("Retry-After", 60))
+            if response.status_code == 403 and self._is_rate_limited_response(response):
+                # Primary rate limit: wait until the reset time (or Retry-After).
+                retry_after = self._retry_after_seconds(response)
                 logger.warning(
                     "Rate limit hit (403). Waiting %d seconds (attempt %d/%d).",
                     retry_after,
@@ -425,7 +421,7 @@ query({", ".join(variable_definitions)}) {{
                 continue
 
             if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 60))
+                retry_after = self._retry_after_seconds(response)
                 logger.warning(
                     "Secondary rate limit hit (429). Waiting %d seconds (attempt %d/%d).",
                     retry_after,
@@ -439,10 +435,32 @@ query({", ".join(variable_definitions)}) {{
                 time.sleep(retry_after)
                 continue
 
+            if response.status_code in (401, 403):
+                raise RuntimeError(
+                    f"GitHub rejected the request ({response.status_code}). Check that GITHUB_TOKEN is "
+                    f"valid and has read access to the configured repositories: {response.text[:200]}"
+                )
             response.raise_for_status()
 
         # Should not be reached.
         raise RateLimitError("Exhausted retries without a successful response.")
+
+    @staticmethod
+    def _is_rate_limited_response(response: requests.Response) -> bool:
+        """Distinguish a rate-limit 403 from a permissions/auth 403."""
+        if response.headers.get("X-RateLimit-Remaining") == "0" or "Retry-After" in response.headers:
+            return True
+        return "rate limit" in response.text.lower()
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response, default: int = 60, maximum: int = 900) -> int:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            return min(int(retry_after), maximum)
+        reset_at = response.headers.get("X-RateLimit-Reset")
+        if reset_at and reset_at.isdigit():
+            return min(max(int(reset_at) - int(time.time()), 1), maximum)
+        return default
 
     def _is_rate_limit_error(self, errors: list[dict]) -> bool:
         """Return True if any GraphQL error is a rate-limit error."""

@@ -1,6 +1,7 @@
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("GITHUB_TOKEN", "test-token")
@@ -117,8 +118,8 @@ class GitHubIngestionNormalizationTests(unittest.TestCase):
                             "pullRequests": {
                                 "pageInfo": {"hasNextPage": False, "endCursor": None},
                                 "nodes": [
-                                    {"number": 42, "mergedAt": recent_merged_at, "closedAt": recent_merged_at},
-                                    {"number": 43, "mergedAt": stale_merged_at, "closedAt": stale_merged_at},
+                                    {"number": 42, "updatedAt": recent_merged_at},
+                                    {"number": 43, "updatedAt": stale_merged_at},
                                 ],
                             }
                         }
@@ -135,6 +136,73 @@ class GitHubIngestionNormalizationTests(unittest.TestCase):
         self.assertEqual(prs[0]["pr_number"], 42)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1][1]["number0"], 42)
+        self.assertIn("orderBy: {field: UPDATED_AT, direction: DESC}", calls[0][0])
+
+    def test_fetch_repo_prs_stops_paginating_at_lookback_cutoff_and_includes_open_prs(self):
+        service = GitHubIngestionService.__new__(GitHubIngestionService)
+        service.lookback_days = 7
+        now = datetime.now(timezone.utc)
+        recent = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        stale = (now - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+        list_calls: list[dict] = []
+
+        def detail_node(number: int) -> dict:
+            # An open PR: no mergedAt / closedAt.
+            return {
+                "number": number,
+                "title": f"PR {number}",
+                "createdAt": recent,
+                "mergedAt": None,
+                "closedAt": None,
+                "additions": 1,
+                "deletions": 0,
+                "changedFiles": 1,
+                "author": {"login": "alice"},
+                "reviews": {"totalCount": 0, "nodes": []},
+                "comments": {"totalCount": 0, "nodes": []},
+                "commits": {"totalCount": 0, "nodes": []},
+                "reviewDecision": None,
+            }
+
+        def fake_run_query(query: str, variables: dict):
+            if "pullRequests(" in query:
+                list_calls.append(variables)
+                return {
+                    "data": {
+                        "repository": {
+                            "pullRequests": {
+                                # More pages exist, but the stale node means we must stop.
+                                "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                                "nodes": [
+                                    {"number": 9, "updatedAt": recent},
+                                    {"number": 8, "updatedAt": stale},
+                                ],
+                            }
+                        }
+                    }
+                }
+            return {"data": {"repository": {"pr_0": detail_node(variables["number0"])}}}
+
+        service._run_query = fake_run_query  # type: ignore[method-assign]
+
+        prs = service._fetch_repo_prs("org", "repo")
+
+        self.assertEqual(len(list_calls), 1)
+        self.assertEqual([pr["pr_number"] for pr in prs], [9])
+        self.assertIsNone(prs[0]["merged_at"])
+
+    def test_run_query_fails_fast_on_auth_403(self):
+        service = GitHubIngestionService.__new__(GitHubIngestionService)
+        response = MagicMock(status_code=403, headers={}, text="Resource not accessible by personal access token")
+        service._session = MagicMock()
+        service._session.post.return_value = response
+
+        with patch("app.github_ingestion.time.sleep") as sleep:
+            with self.assertRaises(RuntimeError):
+                service._run_query("query { viewer { login } }", {})
+
+        sleep.assert_not_called()
+        self.assertEqual(service._session.post.call_count, 1)
 
 
 if __name__ == "__main__":
