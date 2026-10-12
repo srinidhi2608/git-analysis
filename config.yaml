@@ -2,4 +2,15 @@ repositories:
   - name: "srinidhi2608/git-analysis"
     is_active: true
 
-
+# Optional: team-based analysis.
+# When `teams` is set, only PRs, reviews, comments and commits authored by the
+# GitHub logins listed below are fetched and stored; everyone else is skipped
+# and reported in the backend log after each sync. The dashboard's Team
+# Overview gets a team selector. Remove the section to ingest everyone.
+#
+# teams:
+#   GrowthTeam:
+#     - name: "CF-Vaishnavi"
+#     - name: "CF-SinchanaBhat"
+#   IppPayFac:
+#     - name: "CF-NewMember"

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
 
 from app.models import Commit, Developer, PullRequest, Repository
@@ -8,6 +8,13 @@ from app.models import Commit, Developer, PullRequest, Repository
 
 def _utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _in_teams(teams: list[str] | None):
+    """Filter clause restricting developers to ``teams`` (``None`` means no restriction)."""
+    if teams is None:
+        return true()
+    return Developer.team_name.in_(teams)
 
 
 def get_pull_request_counts_by_user_story(db: Session):
@@ -24,7 +31,7 @@ def get_pull_request_counts_by_user_story(db: Session):
     return db.execute(stmt).all()
 
 
-def get_team_performance_metrics(db: Session, days: int = 30):
+def get_team_performance_metrics(db: Session, days: int = 30, teams: list[str] | None = None):
     """Return team-level metrics for pull requests created in the last N days."""
     since = _utc_now_naive() - timedelta(days=days)
     team_name = func.coalesce(Developer.team_name, "Unassigned").label("team_name")
@@ -36,7 +43,7 @@ def get_team_performance_metrics(db: Session, days: int = 30):
             func.count(PullRequest.id).label("total_prs"),
         )
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .where(PullRequest.created_at >= since)
+        .where(PullRequest.created_at >= since, _in_teams(teams))
         .group_by(team_name)
         .subquery()
     )
@@ -49,7 +56,7 @@ def get_team_performance_metrics(db: Session, days: int = 30):
         .select_from(Commit)
         .join(PullRequest, Commit.pr_id == PullRequest.id)
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .where(PullRequest.created_at >= since)
+        .where(PullRequest.created_at >= since, _in_teams(teams))
         .group_by(team_name)
         .subquery()
     )
@@ -122,13 +129,17 @@ def get_developer_metrics(db: Session, github_username: str):
     return db.execute(stmt).mappings().one_or_none()
 
 
-def get_all_developers(db: Session):
-    """Return all known developers."""
-    stmt = select(Developer.github_username, Developer.team_name).order_by(Developer.github_username)
+def get_all_developers(db: Session, teams: list[str] | None = None):
+    """Return known developers, optionally restricted to ``teams``."""
+    stmt = (
+        select(Developer.github_username, Developer.team_name)
+        .where(_in_teams(teams))
+        .order_by(Developer.github_username)
+    )
     return db.execute(stmt).mappings().all()
 
 
-def get_pr_cycle_time_by_developer(db: Session, days: int = 30):
+def get_pr_cycle_time_by_developer(db: Session, days: int = 30, teams: list[str] | None = None):
     """Return average PR cycle time (hours) per developer for the last N days."""
     since = _utc_now_naive() - timedelta(days=days)
     stmt = (
@@ -139,6 +150,7 @@ def get_pr_cycle_time_by_developer(db: Session, days: int = 30):
         .join(Developer, PullRequest.developer_id == Developer.id)
         .where(PullRequest.created_at >= since)
         .where(PullRequest.cycle_time_minutes.is_not(None))
+        .where(_in_teams(teams))
         .group_by(Developer.github_username)
         .order_by(Developer.github_username)
     )
@@ -149,19 +161,27 @@ def get_pr_cycle_time_by_developer(db: Session, days: int = 30):
     ]
 
 
-def get_prs_per_week(db: Session, developer: str | None = None, weeks: int = 6):
+def get_prs_per_week(
+    db: Session,
+    developer: str | None = None,
+    weeks: int = 6,
+    teams: list[str] | None = None,
+):
     """Return merged PR count per ISO week label for the last N weeks."""
     since = _utc_now_naive() - timedelta(weeks=weeks)
 
-    stmt = select(PullRequest.merged_at).where(
-        PullRequest.merged_at >= since,
-        PullRequest.merged_at.is_not(None),
+    stmt = (
+        select(PullRequest.merged_at)
+        .join(Developer, PullRequest.developer_id == Developer.id)
+        .where(
+            PullRequest.merged_at >= since,
+            PullRequest.merged_at.is_not(None),
+            _in_teams(teams),
+        )
     )
 
     if developer:
-        stmt = stmt.join(Developer, PullRequest.developer_id == Developer.id).where(
-            Developer.github_username == developer
-        )
+        stmt = stmt.where(Developer.github_username == developer)
 
     rows = db.execute(stmt).scalars().all()
 

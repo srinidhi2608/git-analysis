@@ -22,7 +22,8 @@ from app.queries import (
     get_prs_per_week,
     get_all_developers,
 )
-from app.ingest import run_ingestion
+from app.ingest import run_ingestion, sync_developer_teams
+from app.teams import load_team_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -63,6 +64,16 @@ class PrsPerWeekItem(BaseModel):
 class DeveloperItem(BaseModel):
     github_username: str
     team_name: str | None
+
+
+class TeamItem(BaseModel):
+    name: str
+    members: list[str]
+
+
+class TeamsResponse(BaseModel):
+    enabled: bool
+    teams: list[TeamItem]
 
 
 class IngestStatusResponse(BaseModel):
@@ -212,6 +223,11 @@ async def lifespan(app: FastAPI):
     ensure_database_schema()
     global active_repos
     active_repos = load_active_repositories()
+    db = SessionLocal()
+    try:
+        sync_developer_teams(db, load_team_config())
+    finally:
+        db.close()
     yield
 
 
@@ -255,24 +271,50 @@ def get_thresholds():
     }
 
 
+def _resolve_teams(team: str | None) -> list[str] | None:
+    """Translate the optional ``?team=`` query parameter into a team filter.
+
+    Returns ``None`` (no filtering) when no teams are configured. config.yaml is
+    re-read on every call so team edits apply without a restart.
+    """
+    team_config = load_team_config()
+    if team:
+        if team_config.enabled and team not in team_config.teams:
+            raise HTTPException(status_code=404, detail=f"Team '{team}' is not configured")
+        return [team]
+    if team_config.enabled:
+        return team_config.team_names
+    return None
+
+
+@app.get("/api/teams", response_model=TeamsResponse)
+def list_teams():
+    """Teams and members configured in config.yaml."""
+    team_config = load_team_config()
+    return TeamsResponse(
+        enabled=team_config.enabled,
+        teams=[TeamItem(name=name, members=members) for name, members in team_config.teams.items()],
+    )
+
+
 @app.get("/active-repositories")
 def get_active_repositories():
     return {"repositories": active_repos}
 
 
 @app.get("/api/team-performance", response_model=list[TeamPerformanceResponse])
-def team_performance(db: Session = Depends(get_db)):
-    return get_team_performance_metrics(db)
+def team_performance(team: str | None = None, db: Session = Depends(get_db)):
+    return get_team_performance_metrics(db, teams=_resolve_teams(team))
 
 
 @app.get("/api/dora/team", response_model=TeamDoraMetricsResponse)
-def team_dora_metrics(db: Session = Depends(get_db)):
-    return get_team_dora_metrics(db)
+def team_dora_metrics(team: str | None = None, db: Session = Depends(get_db)):
+    return get_team_dora_metrics(db, teams=_resolve_teams(team))
 
 
 @app.get("/api/developers", response_model=list[DeveloperItem])
-def list_developers(db: Session = Depends(get_db)):
-    return get_all_developers(db)
+def list_developers(team: str | None = None, db: Session = Depends(get_db)):
+    return get_all_developers(db, teams=_resolve_teams(team))
 
 
 @app.get("/api/developers/{github_username}", response_model=DeveloperMetricsResponse)
@@ -300,13 +342,17 @@ def developer_dora_metrics(github_username: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/chart/pr-cycle-by-developer", response_model=list[PrCycleByDeveloperItem])
-def chart_pr_cycle_by_developer(db: Session = Depends(get_db)):
-    return get_pr_cycle_time_by_developer(db)
+def chart_pr_cycle_by_developer(team: str | None = None, db: Session = Depends(get_db)):
+    return get_pr_cycle_time_by_developer(db, teams=_resolve_teams(team))
 
 
 @app.get("/api/chart/prs-per-week", response_model=list[PrsPerWeekItem])
-def chart_prs_per_week(db: Session = Depends(get_db), developer: str | None = None):
-    return get_prs_per_week(db, developer=developer)
+def chart_prs_per_week(
+    db: Session = Depends(get_db),
+    developer: str | None = None,
+    team: str | None = None,
+):
+    return get_prs_per_week(db, developer=developer, teams=_resolve_teams(team))
 
 
 def _background_ingest(lookback_days: int = 7):

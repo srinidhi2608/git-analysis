@@ -4,7 +4,7 @@
 
 It pulls PRs, reviews, review comments and commits for the repositories you choose from the GitHub GraphQL API, stores them in PostgreSQL, and shows them in a web dashboard:
 
-- **Team overview**: PR cycle time, merged PRs per week, and **DORA-inspired delivery metrics** (merge frequency, lead time, time to first review, review coverage, approval rate, change-failure proxy, recovery time) with weekly trends.
+- **Team overview**: for all teams or one selected team, PR cycle time, merged PRs per week, and **DORA-inspired delivery metrics** (merge frequency, lead time, time to first review, review coverage, approval rate, change-failure proxy, recovery time) with weekly trends.
 - **Individual performance**: for each developer, PR size, review-comment density, requested-changes rate, rework after feedback, follow-up speed, recurring review themes, top reviewers and the languages they work in.
 - **AI summary (optional)**: written strengths, improvement areas, design-pattern and DRY/WET notes. These come from an online LLM (OpenAI or Gemini) or a local [Ollama](https://ollama.com) model, based on the actual review comments. A rule-based fallback always works, so no AI setup is required.
 
@@ -83,7 +83,7 @@ GITHUB_TOKEN=ghp_your_token_here
 
 That's the only required change. Optionally change `POSTGRES_PASSWORD` too, but do it **before** the first start, because the database password is fixed when the database volume is first created.
 
-### Step 4: Choose the repositories to analyse
+### Step 4: Choose the repositories (and optionally teams) to analyse
 
 Edit `config.yaml`:
 
@@ -93,6 +93,14 @@ repositories:
     is_active: true
   - name: "your-org/another-repo"
     is_active: true
+
+# Optional: only analyse these people, grouped into teams (see 3.3)
+teams:
+  GrowthTeam:
+    - name: "CF-Vaishnavi"         # GitHub login
+    - name: "CF-SinchanaBhat"
+  IppPayFac:
+    - name: "CF-NewMember"
 ```
 
 ### Step 5: Build and start
@@ -176,7 +184,33 @@ These tune scoring and the red/green indicators on the dashboard. All are option
 
 ### 3.3 `config.yaml`
 
-Lists the repositories to ingest. Only entries with `is_active: true` are fetched. Restart the backend after editing (`docker compose restart app` in Docker).
+**`repositories`** lists the repositories to ingest. Only entries with `is_active: true` are fetched. Restart the backend after changing repositories (`docker compose restart app` in Docker).
+
+**`teams`** (optional) turns on team-based analysis:
+
+```yaml
+teams:
+  GrowthTeam:
+    - name: "CF-Vaishnavi"
+    - name: "CF-SinchanaBhat"
+    - name: "CF-SrinidhiCV"
+    - name: "CF-SantoshHM"
+  IppPayFac:
+    - name: "CF-NewMember"
+```
+
+- Each `name` is a **GitHub login**. Matching is case-insensitive. A login listed in two teams stays in the first one, and a warning is logged.
+- **Only listed members are synced.** PRs opened by anyone else are skipped before their details are downloaded. On members' PRs, reviews, comments and commits written by non-members are not stored either. Commits whose author email isn't linked to a GitHub account count as the PR author's.
+- PR-level review signals on a member's PR are kept as GitHub reports them, even when the reviewer isn't a member: review/approval/requested-changes counts, and first/last feedback time. A member's PR approved by someone outside the teams still counts as reviewed.
+- **Skipped people are logged** at the end of every sync, so you can spot anyone missing from the list:
+  ```
+  WARNING - Skipped data from 2 GitHub user(s) not listed under 'teams' in config.yaml:
+  WARNING -   not in any team: dependabot (3 pull_request(s)) in ichequenetwork/acquiring
+  WARNING -   not in any team: john-doe (1 pull_request(s), 4 review(s), 2 comment(s)) in ichequenetwork/acquiring, ichequenetwork/token-management
+  ```
+- **Dashboard:** a **Team** selector appears above the cards. *All teams* combines every configured team, and choosing a team scopes the Team Overview (cards, DORA metrics, charts) and the Individual developer list to that team.
+- Team changes apply when the backend starts and on every sync. Developers removed from all teams are hidden; their earlier data stays in the database. Run `scripts/clear_data.sql` and re-sync if you want it gone.
+- Without a `teams` section, everyone is synced and shown together, as before.
 
 ---
 
@@ -184,7 +218,7 @@ Lists the repositories to ingest. Only entries with `is_active: true` are fetche
 
 ### 4.1 Sync from GitHub (UI)
 
-Click **⟳ Sync from GitHub**. Ingestion imports every PR (open, closed or merged) that was **updated within the Lookback window**, for all active repositories. That includes its reviews, review comments, PR comments and commits. Re-running is safe: existing rows are updated, never duplicated. Only one sync runs at a time; a second request while one is running gets `409 Conflict`.
+Click **⟳ Sync from GitHub**. Ingestion imports every PR (open, closed or merged) that was **updated within the Lookback window**, for all active repositories, limited to team members if `teams` is configured. That includes its reviews, review comments, PR comments and commits. Re-running is safe: existing rows are updated, never duplicated. Only one sync runs at a time; a second request while one is running gets `409 Conflict`.
 
 ### 4.2 Sync from the command line
 
@@ -210,6 +244,8 @@ docker compose exec db psql -U git_user -d git_analysis -f /scripts/seed_data.sq
 # Your own PostgreSQL
 psql "postgresql://git_user:changeme@localhost:5432/git_analysis" -f scripts/seed_data.sql
 ```
+
+If `teams` is configured, the sample developers (`alice_dev`, `bob_dev`, `carol_dev`) only appear when listed in a team, e.g. `Backend: [{name: alice_dev}, {name: bob_dev}]`.
 
 To wipe **all** data (sample and synced) and start clean:
 
@@ -343,6 +379,7 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 |---|---|---|
 | GET | `/health` | Health check |
 | GET | `/active-repositories` | Active repositories from `config.yaml` |
+| GET | `/api/teams` | Teams and members configured in `config.yaml` |
 | GET | `/api/config/thresholds` | Active metric thresholds |
 | GET | `/api/team-performance` | Team-level PR metrics (PRs created in the last 30 days) |
 | GET | `/api/dora/team` | Team DORA-inspired metrics (30 days) + 8-week trends |
@@ -352,6 +389,8 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/developers/{username}/dora` | DORA-inspired metrics for one developer |
 | GET | `/api/chart/pr-cycle-by-developer` | Avg cycle time per developer (30 days) |
 | GET | `/api/chart/prs-per-week` | Merged PRs per ISO week (6 weeks); optional `?developer=<username>` |
+
+The team-level endpoints (`/api/team-performance`, `/api/dora/team`, `/api/developers`, `/api/chart/*`) accept an optional `?team=<TeamName>` to scope results to one configured team. An unknown team returns `404`. Without it, they cover all configured teams, or everyone when no teams are configured.
 | POST | `/api/ingest` | Start a GitHub sync in the background. Body: `{"lookback_days": 7}`. Returns `202`, or `409` if one is already running |
 | GET | `/api/ingest/status` | `running` or `idle` |
 
@@ -387,7 +426,8 @@ Team metrics use PRs **created** in the last 30 days. Developer analytics use al
 app/
   main.py               FastAPI app: routes, background ingestion, SPA serving
   config.py             Settings (environment / .env)
-  config_loader.py      Reads config.yaml
+  config_loader.py      Reads config.yaml (repositories)
+  teams.py              Reads config.yaml teams, member filter, skipped-author log
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
@@ -429,6 +469,7 @@ npm run build
 
 | Symptom | Fix |
 |---|---|
+| A developer is missing after a sync | They aren't listed under `teams` in `config.yaml` (check the "not in any team" lines in the log), or their login is misspelled |
 | Dashboard is empty | Click **⟳ Sync from GitHub**, or [load the sample data](#43-load-sample-demo-data). Check `config.yaml` lists the right repositories |
 | Sync finishes but nothing appears | Check `docker compose logs app`. *"GitHub rejected the request (401/403)"* means the token is invalid or lacks access to the repository. Also try a bigger Lookback: only PRs updated in that window are imported |
 | App container exits with a `github_token` / `database_url` "Field required" error | `GITHUB_TOKEN` is missing from `.env` (or `DATABASE_URL` when running without Docker) |

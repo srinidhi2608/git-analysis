@@ -50,6 +50,16 @@ interface DeveloperItem {
   team_name: string | null;
 }
 
+interface TeamItem {
+  name: string;
+  members: string[];
+}
+
+interface TeamsResponse {
+  enabled: boolean;
+  teams: TeamItem[];
+}
+
 interface TeamPerformance {
   team_name: string;
   average_pr_cycle_time_minutes: number | null;
@@ -866,6 +876,9 @@ async function apiFetch<T>(path: string): Promise<T> {
 export default function GitAnalyticsDashboard() {
   const [activeTab, setActiveTab] = useState<TabKey>("team");
   const [selectedDeveloper, setSelectedDeveloper] = useState<string>("");
+  // "" = all configured teams
+  const [selectedTeam, setSelectedTeam] = useState<string>("");
+  const [teams, setTeams] = useState<TeamItem[]>([]);
   const [lookbackDays, setLookbackDays] = useState<number>(7);
 
   const [teamPerf, setTeamPerf] = useState<TeamPerformance[]>([]);
@@ -902,22 +915,26 @@ export default function GitAnalyticsDashboard() {
     setDoraLoading(true);
     setDoraError("");
     try {
-      const [perf, cycle, prsWeek, devs, dora, thresh] = await Promise.all([
-        apiFetch<TeamPerformance[]>("/api/team-performance"),
-        apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
-        apiFetch<PrsPerWeekItem[]>("/api/chart/prs-per-week"),
-        apiFetch<DeveloperItem[]>("/api/developers"),
-        apiFetch<TeamDoraMetricsResponse>("/api/dora/team"),
+      const teamQuery = selectedTeam ? `?team=${encodeURIComponent(selectedTeam)}` : "";
+      const [perf, cycle, prsWeek, devs, dora, thresh, teamList] = await Promise.all([
+        apiFetch<TeamPerformance[]>(`/api/team-performance${teamQuery}`),
+        apiFetch<PrCycleItem[]>(`/api/chart/pr-cycle-by-developer${teamQuery}`),
+        apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week${teamQuery}`),
+        apiFetch<DeveloperItem[]>(`/api/developers${teamQuery}`),
+        apiFetch<TeamDoraMetricsResponse>(`/api/dora/team${teamQuery}`),
         apiFetch<Thresholds>("/api/config/thresholds"),
+        apiFetch<TeamsResponse>("/api/teams"),
       ]);
+      setTeams(teamList.teams);
       setTeamPerf(perf);
       setCycleByDev(cycle);
       setTeamPrsPerWeek(prsWeek);
       setDevelopers(devs);
       setTeamDoraMetrics(dora);
       setThresholds(thresh);
-      if (!selectedDeveloper && devs.length > 0) {
-        setSelectedDeveloper(devs[0].github_username);
+      // Keep the selected developer only if they belong to the selected team.
+      if (!devs.some((d) => d.github_username === selectedDeveloper)) {
+        setSelectedDeveloper(devs[0]?.github_username ?? "");
       }
     } catch {
       setTeamDoraMetrics(null);
@@ -926,7 +943,7 @@ export default function GitAnalyticsDashboard() {
     } finally {
       setDoraLoading(false);
     }
-  }, [selectedDeveloper]);
+  }, [selectedDeveloper, selectedTeam]);
 
   const loadIndividualData = useCallback(async (dev: string) => {
     if (!dev) {
@@ -974,10 +991,11 @@ export default function GitAnalyticsDashboard() {
     }
   }, [loadTeamData, loadIndividualData, selectedDeveloper]);
 
+  // Initial load, and reload whenever the selected team changes.
   useEffect(() => {
     refreshData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectedTeam]);
 
   useEffect(() => {
     if (selectedDeveloper) loadIndividualData(selectedDeveloper);
@@ -1109,23 +1127,47 @@ export default function GitAnalyticsDashboard() {
           {error && <p className="mt-3 rounded-lg bg-red-900/40 px-4 py-2 text-sm text-red-300">{error}</p>}
         </div>
 
-        {!isTeamView && developers.length > 0 && (
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-slate-400" htmlFor="dev-select">
-              Developer:
-            </label>
-            <select
-              id="dev-select"
-              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:outline-none"
-              onChange={(e) => setSelectedDeveloper(e.target.value)}
-              value={selectedDeveloper}
-            >
-              {developers.map((d) => (
-                <option key={d.github_username} value={d.github_username}>
-                  {d.github_username}
-                </option>
-              ))}
-            </select>
+        {(teams.length > 0 || (!isTeamView && developers.length > 0)) && (
+          <div className="flex flex-wrap items-center gap-3">
+            {teams.length > 0 && (
+              <>
+                <label className="text-sm text-slate-400" htmlFor="team-select">
+                  Team:
+                </label>
+                <select
+                  id="team-select"
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:outline-none"
+                  onChange={(e) => setSelectedTeam(e.target.value)}
+                  value={selectedTeam}
+                >
+                  <option value="">All teams</option>
+                  {teams.map((t) => (
+                    <option key={t.name} value={t.name}>
+                      {t.name} ({t.members.length})
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            {!isTeamView && developers.length > 0 && (
+              <>
+                <label className="text-sm text-slate-400" htmlFor="dev-select">
+                  Developer:
+                </label>
+                <select
+                  id="dev-select"
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:outline-none"
+                  onChange={(e) => setSelectedDeveloper(e.target.value)}
+                  value={selectedDeveloper}
+                >
+                  {developers.map((d) => (
+                    <option key={d.github_username} value={d.github_username}>
+                      {d.github_username}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
           </div>
         )}
 
@@ -1140,7 +1182,7 @@ export default function GitAnalyticsDashboard() {
 
         {isTeamView ? (
           <DoraMetricsPanel
-            title="Team Delivery Performance"
+            title={selectedTeam ? `${selectedTeam} Delivery Performance` : "Team Delivery Performance"}
             subtitle="GitHub-native proxies for DORA delivery, lead time, quality, and review flow."
             metrics={teamDoraMetrics?.summary ?? null}
             weeklyTrends={teamDoraMetrics?.weekly_trends ?? []}

@@ -16,6 +16,7 @@ import requests
 
 from app.config import settings
 from app.config_loader import load_active_repositories
+from app.teams import SkippedAuthors, TeamConfig, load_team_config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -40,6 +41,7 @@ query($owner: String!, $repo: String!, $after: String) {
       nodes {
         number
         updatedAt
+        author { login }
       }
     }
   }
@@ -92,6 +94,7 @@ commits(first: 100) {
       oid
       message
       committedDate
+      author { user { login } }
     }
   }
 }
@@ -114,11 +117,22 @@ class GitHubIngestionService:
         Path to the YAML file that lists active repositories.
     lookback_days:
         How many days back to fetch PRs for (default 7).
+    team_config:
+        Team membership. When teams are configured, PRs, reviews, comments and
+        commits authored by anyone who is not a listed member are skipped (and
+        reported via ``skipped``). Loaded from ``config_path`` when omitted.
     """
 
-    def __init__(self, config_path: str = "config.yaml", lookback_days: int = 7) -> None:
+    def __init__(
+        self,
+        config_path: str = "config.yaml",
+        lookback_days: int = 7,
+        team_config: TeamConfig | None = None,
+    ) -> None:
         self.config_path = config_path
         self.lookback_days = lookback_days
+        self.team_config = team_config if team_config is not None else load_team_config(config_path)
+        self.skipped = SkippedAuthors()
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -140,6 +154,12 @@ class GitHubIngestionService:
             One dict per pull request, across all repositories.
         """
         repos = load_active_repositories(self.config_path)
+        self.skipped = SkippedAuthors()
+        if self.team_config.enabled:
+            logger.info(
+                "Team filter active: only ingesting data from members of %s.",
+                ", ".join(self.team_config.team_names),
+            )
         results: list[dict[str, Any]] = []
         for repo_entry in repos:
             repo_name: str = repo_entry["name"]
@@ -152,6 +172,7 @@ class GitHubIngestionService:
             prs = self._fetch_repo_prs(owner, name)
             logger.info("Fetched %d PRs for %s", len(prs), repo_name)
             results.extend(prs)
+        self.skipped.log_summary()
         return results
 
     # ------------------------------------------------------------------
@@ -185,6 +206,11 @@ class GitHubIngestionService:
                     # Results are ordered by updatedAt DESC, so every later PR is older too.
                     reached_cutoff = True
                     break
+                author_login = (node.get("author") or {}).get("login")
+                if not self.team_config.is_member(author_login):
+                    # Not a team member: do not download the PR's details at all.
+                    self.skipped.record(author_login, "pull_request", f"{owner}/{repo}")
+                    continue
                 recent_pr_numbers.append(node["number"])
 
             for pr_number_batch in self._chunked(recent_pr_numbers, DETAIL_BATCH_SIZE):
@@ -320,6 +346,37 @@ query({", ".join(variable_definitions)}) {{
                 }
             )
 
+        repository = f"{owner}/{repo}"
+        member_comments: list[dict[str, Any]] = []
+        for comment in comments:
+            if self.team_config.is_member(comment.get("author_login")):
+                member_comments.append(comment)
+            else:
+                kind = "review" if comment["comment_type"] == "review" else "comment"
+                self.skipped.record(comment.get("author_login"), kind, repository)
+
+        member_commits: list[dict[str, Any]] = []
+        for commit_node in commit_nodes:
+            commit = commit_node.get("commit") or {}
+            if not commit.get("oid"):
+                continue
+            # Commits whose author email is not linked to a GitHub account have no
+            # login; they are attributed to the PR author.
+            commit_login = ((commit.get("author") or {}).get("user") or {}).get("login")
+            if commit_login and not self.team_config.is_member(commit_login):
+                self.skipped.record(commit_login, "commit", repository)
+                continue
+            member_commits.append(
+                {
+                    "commit_hash": commit["oid"],
+                    "message": commit.get("message") or "",
+                    "committed_at": commit.get("committedDate"),
+                }
+            )
+
+        # PR-level review signals (counts, first/last feedback time) describe the
+        # member's PR and are kept as reported by GitHub; only the non-member
+        # authored comment text and commits are dropped above.
         feedback_timestamps = sorted(
             comment["created_at"]
             for comment in comments
@@ -354,16 +411,8 @@ query({", ".join(variable_definitions)}) {{
             "review_decision": node.get("reviewDecision"),
             "first_review_comment_at": feedback_timestamps[0] if feedback_timestamps else None,
             "last_review_comment_at": feedback_timestamps[-1] if feedback_timestamps else None,
-            "comments": [comment for comment in comments if comment.get("external_id")],
-            "commits": [
-                {
-                    "commit_hash": commit["commit"]["oid"],
-                    "message": commit["commit"]["message"],
-                    "committed_at": commit["commit"].get("committedDate"),
-                }
-                for commit in commit_nodes
-                if commit.get("commit") and commit["commit"].get("oid")
-            ],
+            "comments": [comment for comment in member_comments if comment.get("external_id")],
+            "commits": member_commits,
         }
 
     def _run_query(self, query: str, variables: dict) -> dict[str, Any]:

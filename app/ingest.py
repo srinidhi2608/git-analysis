@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.github_ingestion import GitHubIngestionService
 from app.models import Commit, Developer, PullRequest, PullRequestComment, Repository
+from app.teams import TeamConfig, load_team_config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -88,13 +89,34 @@ def _upsert_comment(db: Session, pull_request: PullRequest, comment_data: dict) 
     existing.created_at = created_at
 
 
-def _upsert_developer(db: Session, github_username: str) -> Developer:
+def _upsert_developer(db: Session, github_username: str, team_config: TeamConfig) -> Developer:
     dev = db.query(Developer).filter_by(github_username=github_username).first()
     if dev is None:
         dev = Developer(github_username=github_username, team_name=None)
         db.add(dev)
-        db.flush()
+    if team_config.enabled:
+        dev.team_name = team_config.team_for(github_username)
+    db.flush()
     return dev
+
+
+def sync_developer_teams(db: Session, team_config: TeamConfig) -> None:
+    """Apply config.yaml team assignments to developers already in the database.
+
+    Developers no longer listed in any team get ``team_name = NULL`` and are hidden
+    from the dashboard while teams are configured.
+    """
+    if not team_config.enabled:
+        return
+    changed = 0
+    for dev in db.query(Developer).all():
+        team_name = team_config.team_for(dev.github_username)
+        if dev.team_name != team_name:
+            dev.team_name = team_name
+            changed += 1
+    db.commit()
+    if changed:
+        logger.info("Updated team assignment for %d developer(s) from config.yaml.", changed)
 
 
 def _upsert_repository(db: Session, name: str) -> Repository:
@@ -106,15 +128,20 @@ def _upsert_repository(db: Session, name: str) -> Repository:
     return repo
 
 
-def run_ingestion(db: Session, lookback_days: int = 7) -> int:
+def run_ingestion(db: Session, lookback_days: int = 7, config_path: str = "config.yaml") -> int:
     """Fetch GitHub PR data and persist it to the database.
+
+    When teams are configured in config.yaml, only data authored by team members
+    is fetched and stored (see ``app.teams``).
 
     Returns
     -------
     int
         Number of pull requests upserted.
     """
-    service = GitHubIngestionService(lookback_days=lookback_days)
+    team_config = load_team_config(config_path)
+    sync_developer_teams(db, team_config)
+    service = GitHubIngestionService(config_path=config_path, lookback_days=lookback_days, team_config=team_config)
     prs = service.fetch_all()
     logger.info("Fetched %d pull requests from GitHub.", len(prs))
 
@@ -127,13 +154,13 @@ def run_ingestion(db: Session, lookback_days: int = 7) -> int:
             pr_number: int = pr_data["pr_number"]
             author: str | None = pr_data.get("author")
 
-            if not author:
-                logger.debug("PR #%s in %s has no author; skipping.", pr_number, repo_name)
+            if not author or not team_config.is_member(author):
+                logger.debug("PR #%s in %s has no team-member author; skipping.", pr_number, repo_name)
                 savepoint.rollback()
                 continue
 
             repo = _upsert_repository(db, repo_name)
-            dev = _upsert_developer(db, author)
+            dev = _upsert_developer(db, author, team_config)
 
             created_at = _parse_dt(pr_data.get("created_at"))
             merged_at = _parse_dt(pr_data.get("merged_at"))

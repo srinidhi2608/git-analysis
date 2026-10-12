@@ -174,15 +174,21 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
     return {"summary": summary, "weekly_trends": weekly_trends}
 
 
-def get_team_dora_metrics(db: Session, window_days: int = 30, trend_weeks: int = 8) -> dict[str, Any]:
+def get_team_dora_metrics(
+    db: Session,
+    window_days: int = 30,
+    trend_weeks: int = 8,
+    teams: list[str] | None = None,
+) -> dict[str, Any]:
     since = _utc_now_naive() - timedelta(days=window_days)
-    prs = (
+    query = (
         db.query(PullRequest)
         .join(Developer, PullRequest.developer_id == Developer.id)
         .filter(PullRequest.created_at >= since)
-        .order_by(PullRequest.created_at.desc())
-        .all()
     )
+    if teams is not None:
+        query = query.filter(Developer.team_name.in_(teams))
+    prs = query.order_by(PullRequest.created_at.desc()).all()
     return _build_metrics(prs, window_days=window_days, trend_weeks=trend_weeks)
 
 
