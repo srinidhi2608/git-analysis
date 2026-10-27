@@ -143,7 +143,9 @@ class DeveloperAnalyticsTests(unittest.TestCase):
         categories = {item["category"] for item in analytics["breakdown"]["comment_categories"]}
         self.assertIn("testing", categories)
         self.assertIn("style", categories)
-        self.assertEqual(analytics["summary"]["provider"], "heuristic-fallback")
+        # Ollama is unreachable in tests, so the rule-based analyzer is the provider.
+        self.assertEqual(analytics["summary"]["provider"], "Rule-based (heuristic)")
+        self.assertEqual(analytics["summary"]["narrative_provider"], "heuristic-fallback")
         self.assertIn("Based on 2 saved PRs", analytics["summary"]["overview"])
 
     def test_handles_sparse_saved_comment_data(self):

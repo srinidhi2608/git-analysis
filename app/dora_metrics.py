@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import Developer, PullRequest
@@ -46,10 +47,31 @@ def _summary_template(window_days: int) -> dict[str, Any]:
         "change_failure_proxy_rate": 0.0,
         "average_recovery_time_hours": None,
         "recovery_samples": 0,
+        "ghost_merge_count": 0,
+        "ghost_merge_rate": 0.0,
     }
 
 
-def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -> dict[str, Any]:
+def _is_ghost_merge(pull_request: PullRequest) -> bool:
+    """A merged PR that nobody other than its author reviewed."""
+    return pull_request.merged_at is not None and (pull_request.reviewers_count or 0) == 0
+
+
+def _window_start(window_days: int) -> datetime:
+    return _utc_now_naive() - timedelta(days=window_days)
+
+
+def _active_in_window(since: datetime):
+    """PRs created or merged within the window."""
+    return or_(PullRequest.created_at >= since, PullRequest.merged_at >= since)
+
+
+def _build_metrics(prs: list[PullRequest], window_days: int, since: datetime) -> dict[str, Any]:
+    """Summary and weekly trends for PRs active in the window starting at ``since``.
+
+    Merge-based figures (merges, lead time, ghost merges, weekly trends) only count
+    PRs merged inside the window.
+    """
     summary = _summary_template(window_days)
     if not prs:
         return {"summary": summary, "weekly_trends": []}
@@ -62,8 +84,8 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
     approved_pr_count = 0
     requested_changes_merged_pr_count = 0
     merged_pr_count = 0
+    ghost_merge_count = 0
 
-    trend_cutoff = _utc_now_naive() - timedelta(weeks=trend_weeks)
     trend_buckets: defaultdict[str, dict[str, Any]] = defaultdict(
         lambda: {
             "week": "",
@@ -72,6 +94,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
             "first_review_times": [],
             "reviewed_prs": 0,
             "change_failure_proxy_count": 0,
+            "ghost_merges": 0,
         }
     )
 
@@ -94,12 +117,13 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
         if (pull_request.approvals_count or 0) > 0:
             approved_pr_count += 1
 
-        if lead_time is not None:
+        merged_in_window = pull_request.merged_at is not None and pull_request.merged_at >= since
+        if lead_time is not None and merged_in_window:
             lead_times.append(lead_time)
         if first_review_time is not None:
             first_review_times.append(first_review_time)
 
-        if (pull_request.requested_changes_count or 0) > 0:
+        if (pull_request.requested_changes_count or 0) > 0 and merged_in_window:
             recovery_time = _hours_between(
                 pull_request.merged_at,
                 pull_request.last_review_comment_at,
@@ -107,14 +131,15 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
             if recovery_time is not None:
                 recovery_times.append(recovery_time)
 
-        if pull_request.merged_at is None:
+        if pull_request.merged_at is None or pull_request.merged_at < since:
             continue
 
         merged_pr_count += 1
+        ghost_merge = _is_ghost_merge(pull_request)
+        if ghost_merge:
+            ghost_merge_count += 1
         if (pull_request.requested_changes_count or 0) > 0:
             requested_changes_merged_pr_count += 1
-        if pull_request.merged_at < trend_cutoff:
-            continue
 
         week = _week_label(pull_request.merged_at)
         bucket = trend_buckets[week]
@@ -128,6 +153,8 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
             bucket["reviewed_prs"] += 1
         if (pull_request.requested_changes_count or 0) > 0:
             bucket["change_failure_proxy_count"] += 1
+        if ghost_merge:
+            bucket["ghost_merges"] += 1
 
     summary["merged_pull_request_count"] = merged_pr_count
     summary["reviewed_pull_request_count"] = reviewed_pr_count
@@ -148,6 +175,8 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
         sum(recovery_times) / len(recovery_times) if recovery_times else None
     )
     summary["recovery_samples"] = len(recovery_times)
+    summary["ghost_merge_count"] = ghost_merge_count
+    summary["ghost_merge_rate"] = _round((ghost_merge_count / merged_pr_count) * 100 if merged_pr_count else 0)
 
     weekly_trends = []
     for week in sorted(trend_buckets):
@@ -168,6 +197,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
                 "change_failure_proxy_rate": _round(
                     (bucket["change_failure_proxy_count"] / bucket["merged_prs"]) * 100 if bucket["merged_prs"] else 0
                 ),
+                "ghost_merges": bucket["ghost_merges"],
             }
         )
 
@@ -177,42 +207,37 @@ def _build_metrics(prs: list[PullRequest], window_days: int, trend_weeks: int) -
 def get_team_dora_metrics(
     db: Session,
     window_days: int = 30,
-    trend_weeks: int = 8,
     teams: list[str] | None = None,
 ) -> dict[str, Any]:
-    since = _utc_now_naive() - timedelta(days=window_days)
+    since = _window_start(window_days)
     query = (
         db.query(PullRequest)
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .filter(PullRequest.created_at >= since)
+        .filter(_active_in_window(since))
     )
     if teams is not None:
         query = query.filter(Developer.team_name.in_(teams))
     prs = query.order_by(PullRequest.created_at.desc()).all()
-    return _build_metrics(prs, window_days=window_days, trend_weeks=trend_weeks)
+    return _build_metrics(prs, window_days=window_days, since=since)
 
 
 def get_developer_dora_metrics(
     db: Session,
     github_username: str,
     window_days: int = 30,
-    trend_weeks: int = 8,
 ) -> dict[str, Any] | None:
     developer = db.query(Developer).filter(Developer.github_username == github_username).one_or_none()
     if developer is None:
         return None
 
-    since = _utc_now_naive() - timedelta(days=window_days)
+    since = _window_start(window_days)
     prs = (
         db.query(PullRequest)
-        .filter(
-            PullRequest.developer_id == developer.id,
-            PullRequest.created_at >= since,
-        )
+        .filter(PullRequest.developer_id == developer.id, _active_in_window(since))
         .order_by(PullRequest.created_at.desc())
         .all()
     )
-    metrics = _build_metrics(prs, window_days=window_days, trend_weeks=trend_weeks)
+    metrics = _build_metrics(prs, window_days=window_days, since=since)
     return {
         "github_username": developer.github_username,
         "team_name": developer.team_name,

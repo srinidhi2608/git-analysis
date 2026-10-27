@@ -51,6 +51,7 @@ query($owner: String!, $repo: String!, $after: String) {
 PR_DETAIL_SELECTION = """
 number
 title
+updatedAt
 createdAt
 mergedAt
 closedAt
@@ -121,6 +122,10 @@ class GitHubIngestionService:
         Team membership. When teams are configured, PRs, reviews, comments and
         commits authored by anyone who is not a listed member are skipped (and
         reported via ``skipped``). Loaded from ``config_path`` when omitted.
+    known_updated_at:
+        ``{("owner/repo", pr_number): updatedAt}`` of PRs already stored. PRs whose
+        GitHub ``updatedAt`` is unchanged are not downloaded again (counted in
+        ``unchanged_count``). Pass ``None`` to refetch everything.
     """
 
     def __init__(
@@ -128,11 +133,15 @@ class GitHubIngestionService:
         config_path: str = "config.yaml",
         lookback_days: int = 7,
         team_config: TeamConfig | None = None,
+        known_updated_at: dict[tuple[str, int], datetime] | None = None,
     ) -> None:
         self.config_path = config_path
         self.lookback_days = lookback_days
         self.team_config = team_config if team_config is not None else load_team_config(config_path)
         self.skipped = SkippedAuthors()
+        self.known_updated_at = known_updated_at or {}
+        self.unchanged_count = 0
+        self.request_count = 0
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -155,6 +164,8 @@ class GitHubIngestionService:
         """
         repos = load_active_repositories(self.config_path)
         self.skipped = SkippedAuthors()
+        self.unchanged_count = 0
+        self.request_count = 0
         if self.team_config.enabled:
             logger.info(
                 "Team filter active: only ingesting data from members of %s.",
@@ -173,6 +184,12 @@ class GitHubIngestionService:
             logger.info("Fetched %d PRs for %s", len(prs), repo_name)
             results.extend(prs)
         self.skipped.log_summary()
+        logger.info(
+            "GitHub sync used %d API request(s); %d PR(s) fetched, %d unchanged PR(s) not downloaded again.",
+            self.request_count,
+            len(results),
+            self.unchanged_count,
+        )
         return results
 
     # ------------------------------------------------------------------
@@ -210,6 +227,11 @@ class GitHubIngestionService:
                 if not self.team_config.is_member(author_login):
                     # Not a team member: do not download the PR's details at all.
                     self.skipped.record(author_login, "pull_request", f"{owner}/{repo}")
+                    continue
+                known = self.known_updated_at.get((f"{owner}/{repo}", node["number"]))
+                if known is not None and known == updated_at.replace(tzinfo=None):
+                    # Stored copy is current: save the detail request.
+                    self.unchanged_count += 1
                     continue
                 recent_pr_numbers.append(node["number"])
 
@@ -399,6 +421,7 @@ query({", ".join(variable_definitions)}) {{
             "reviewers": reviewer_logins,
             "created_at": node["createdAt"],
             "merged_at": node.get("mergedAt"),
+            "updated_at": node.get("updatedAt"),
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
             "changed_files": node.get("changedFiles") or 0,
@@ -427,6 +450,7 @@ query({", ".join(variable_definitions)}) {{
         """
         max_retries = 3
         for attempt in range(1, max_retries + 1):
+            self.request_count += 1
             response = self._session.post(
                 GITHUB_GRAPHQL_URL,
                 json={"query": query, "variables": variables},

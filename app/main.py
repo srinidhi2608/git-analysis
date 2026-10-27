@@ -2,10 +2,11 @@ import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, TypeVar
 
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +26,8 @@ from app.queries import (
     get_all_developers,
 )
 from app.ingest import run_ingestion, sync_developer_teams
+from app.models import PullRequest
+from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_snapshot
 from app.teams import load_team_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -33,10 +36,15 @@ active_repos: list = []
 T = TypeVar("T")
 # How often a long-running request checks whether the browser has gone away.
 DISCONNECT_POLL_SECONDS = 0.5
+# Dashboard window ("Lookback" in the UI), in days.
+WindowDays = Query(30, ge=1, le=3650, description="Only include PRs created or merged in the last N days")
 # Non-standard "Client Closed Request" status (nginx convention); the client never sees it.
 CLIENT_CLOSED_REQUEST = 499
-# Only one ingestion may run at a time; concurrent runs would race on upserts.
+# Only one ingestion (or snapshot save/load) may run at a time; concurrent runs
+# would race on upserts.
 _ingestion_lock = threading.Lock()
+# Outcome of the most recent sync, reported by GET /api/ingest/status.
+_last_ingestion: dict | None = None
 
 # ---------------------------------------------------------------------------
 # Pydantic response models
@@ -86,10 +94,36 @@ class TeamsResponse(BaseModel):
 class IngestStatusResponse(BaseModel):
     status: str
     message: str
+    last_run: dict | None = None
 
 
 class IngestRequest(BaseModel):
     lookback_days: int = 7
+    # Re-download every PR in the lookback window, even ones unchanged on GitHub.
+    full_refresh: bool = False
+
+
+class SnapshotItem(BaseModel):
+    name: str
+    size_bytes: int
+    created_at: str
+
+
+class SnapshotListResponse(BaseModel):
+    directory: str
+    autoload: bool
+    save_after_sync: bool
+    snapshots: list[SnapshotItem]
+
+
+class SnapshotResultResponse(BaseModel):
+    name: str
+    counts: dict[str, int]
+
+
+class SnapshotLoadRequest(BaseModel):
+    # Snapshot file name; the newest snapshot when omitted.
+    name: str | None = None
 
 
 class DeveloperAnalyticsMetricsResponse(BaseModel):
@@ -152,7 +186,10 @@ class DeveloperAnalyticsCategorySummary(BaseModel):
 
 
 class DeveloperAnalyticsSummaryResponse(BaseModel):
+    # AI tier that analysed the review comments, e.g. "Ollama (qwen2.5-coder:14b)".
     provider: str
+    # Engine that wrote the overview text ("heuristic-fallback" or "configured-http-provider").
+    narrative_provider: str = ""
     confidence: str
     overview: str
     categories: list[DeveloperAnalyticsCategorySummary]
@@ -198,6 +235,8 @@ class DoraSummaryResponse(BaseModel):
     change_failure_proxy_rate: float
     average_recovery_time_hours: float | None
     recovery_samples: int
+    ghost_merge_count: int = 0
+    ghost_merge_rate: float = 0.0
 
 
 class DoraWeeklyTrendItem(BaseModel):
@@ -206,6 +245,7 @@ class DoraWeeklyTrendItem(BaseModel):
     average_lead_time_hours: float | None
     average_time_to_first_review_hours: float | None
     change_failure_proxy_rate: float
+    ghost_merges: int = 0
 
 
 class TeamDoraMetricsResponse(BaseModel):
@@ -225,6 +265,19 @@ class DeveloperDoraMetricsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _autoload_snapshot(db: Session) -> None:
+    """Restore the newest snapshot into an empty database (e.g. after `down -v`)."""
+    if not settings.snapshot_autoload or db.query(PullRequest.id).first() is not None:
+        return
+    path = resolve_snapshot(settings.snapshot_dir)
+    if path is None:
+        return
+    try:
+        load_snapshot(db, path)
+    except Exception:
+        logger.exception("Could not load snapshot %s at startup.", path)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ensure_database_schema()
@@ -232,6 +285,7 @@ async def lifespan(app: FastAPI):
     active_repos = load_active_repositories()
     db = SessionLocal()
     try:
+        _autoload_snapshot(db)
         sync_developer_teams(db, load_team_config())
     finally:
         db.close()
@@ -310,13 +364,13 @@ def get_active_repositories():
 
 
 @app.get("/api/team-performance", response_model=list[TeamPerformanceResponse])
-def team_performance(team: str | None = None, db: Session = Depends(get_db)):
-    return get_team_performance_metrics(db, teams=_resolve_teams(team))
+def team_performance(team: str | None = None, days: int = WindowDays, db: Session = Depends(get_db)):
+    return get_team_performance_metrics(db, days=days, teams=_resolve_teams(team))
 
 
 @app.get("/api/dora/team", response_model=TeamDoraMetricsResponse)
-def team_dora_metrics(team: str | None = None, db: Session = Depends(get_db)):
-    return get_team_dora_metrics(db, teams=_resolve_teams(team))
+def team_dora_metrics(team: str | None = None, days: int = WindowDays, db: Session = Depends(get_db)):
+    return get_team_dora_metrics(db, window_days=days, teams=_resolve_teams(team))
 
 
 @app.get("/api/developers", response_model=list[DeveloperItem])
@@ -372,16 +426,16 @@ async def developer_analytics(github_username: str, request: Request, db: Sessio
 
 
 @app.get("/api/developers/{github_username}/dora", response_model=DeveloperDoraMetricsResponse)
-def developer_dora_metrics(github_username: str, db: Session = Depends(get_db)):
-    metrics = get_developer_dora_metrics(db, github_username)
+def developer_dora_metrics(github_username: str, days: int = WindowDays, db: Session = Depends(get_db)):
+    metrics = get_developer_dora_metrics(db, github_username, window_days=days)
     if metrics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return metrics
 
 
 @app.get("/api/chart/pr-cycle-by-developer", response_model=list[PrCycleByDeveloperItem])
-def chart_pr_cycle_by_developer(team: str | None = None, db: Session = Depends(get_db)):
-    return get_pr_cycle_time_by_developer(db, teams=_resolve_teams(team))
+def chart_pr_cycle_by_developer(team: str | None = None, days: int = WindowDays, db: Session = Depends(get_db)):
+    return get_pr_cycle_time_by_developer(db, days=days, teams=_resolve_teams(team))
 
 
 @app.get("/api/chart/prs-per-week", response_model=list[PrsPerWeekItem])
@@ -389,22 +443,34 @@ def chart_prs_per_week(
     db: Session = Depends(get_db),
     developer: str | None = None,
     team: str | None = None,
+    days: int = WindowDays,
 ):
-    return get_prs_per_week(db, developer=developer, teams=_resolve_teams(team))
+    return get_prs_per_week(db, developer=developer, days=days, teams=_resolve_teams(team))
 
 
-def _background_ingest(lookback_days: int = 7):
+def _background_ingest(lookback_days: int = 7, full_refresh: bool = False):
     """Run ingestion in a background thread with its own DB session.
 
     The caller must hold ``_ingestion_lock``; it is released when the run ends.
     """
+    global _last_ingestion
     db = SessionLocal()
+    result: dict = {"lookback_days": lookback_days}
     try:
-        run_ingestion(db, lookback_days=lookback_days)
-    except Exception:
+        stats = run_ingestion(db, lookback_days=lookback_days, full_refresh=full_refresh)
+        result.update(stats.as_dict())
+        if settings.snapshot_after_sync:
+            try:
+                result["snapshot"] = save_snapshot(db, settings.snapshot_dir)["name"]
+            except Exception:
+                logger.exception("Could not save a snapshot after the sync.")
+    except Exception as exc:
         logger.exception("Background ingestion failed.")
+        result["error"] = str(exc)
     finally:
         db.close()
+        result["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _last_ingestion = result
         _ingestion_lock.release()
 
 
@@ -412,8 +478,8 @@ def _background_ingest(lookback_days: int = 7):
 def ingest_status():
     """Report whether a GitHub ingestion run is currently in progress."""
     if _ingestion_lock.locked():
-        return IngestStatusResponse(status="running", message="Ingestion is in progress.")
-    return IngestStatusResponse(status="idle", message="No ingestion is running.")
+        return IngestStatusResponse(status="running", message="Ingestion is in progress.", last_run=_last_ingestion)
+    return IngestStatusResponse(status="idle", message="No ingestion is running.", last_run=_last_ingestion)
 
 
 @app.post("/api/ingest", response_model=IngestStatusResponse, status_code=202)
@@ -427,11 +493,57 @@ def trigger_ingest(
     if not _ingestion_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="An ingestion run is already in progress.")
 
-    background_tasks.add_task(_background_ingest, payload.lookback_days)
+    background_tasks.add_task(_background_ingest, payload.lookback_days, payload.full_refresh)
     return IngestStatusResponse(
         status="accepted",
         message=f"Ingestion started in the background for PRs updated in the last {payload.lookback_days} days.",
     )
+
+
+@app.get("/api/snapshots", response_model=SnapshotListResponse)
+def snapshots():
+    """Saved snapshots of the ingested data, newest first."""
+    return SnapshotListResponse(
+        directory=str(Path(settings.snapshot_dir).resolve()),
+        autoload=settings.snapshot_autoload,
+        save_after_sync=settings.snapshot_after_sync,
+        snapshots=[SnapshotItem(**item) for item in list_snapshots(settings.snapshot_dir)],
+    )
+
+
+@app.post("/api/snapshots", response_model=SnapshotResultResponse)
+def create_snapshot(db: Session = Depends(get_db)):
+    """Save the current data as a new snapshot file."""
+    if not _ingestion_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A sync is running; save the snapshot when it finishes.")
+    try:
+        return save_snapshot(db, settings.snapshot_dir)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not write snapshot: {exc}") from exc
+    finally:
+        _ingestion_lock.release()
+
+
+@app.post("/api/snapshots/load", response_model=SnapshotResultResponse)
+def restore_snapshot(
+    payload: SnapshotLoadRequest = Body(default_factory=SnapshotLoadRequest),
+    db: Session = Depends(get_db),
+):
+    """Upsert a snapshot (the newest by default) into the database."""
+    try:
+        path = resolve_snapshot(settings.snapshot_dir, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if path is None:
+        raise HTTPException(status_code=404, detail="No snapshot found.")
+    if not _ingestion_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A sync is running; load the snapshot when it finishes.")
+    try:
+        counts = load_snapshot(db, path)
+        sync_developer_teams(db, load_team_config())
+        return SnapshotResultResponse(name=path.name, counts=counts)
+    finally:
+        _ingestion_lock.release()
 
 
 # ---------------------------------------------------------------------------

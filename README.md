@@ -125,7 +125,9 @@ The first build takes a few minutes. When you see `Uvicorn running on http://0.0
 
 ### Step 6: Load data
 
-The dashboard starts empty. Click **⟳ Sync from GitHub** in the header. The button stays in "Syncing…" until ingestion finishes, then the dashboard reloads. Use the **Lookback** field to choose how many days of PR activity to import (for example 30 or 90 for a first import).
+The dashboard starts empty. Click **⟳ Sync from GitHub** in the header. The button stays in "Syncing…" until ingestion finishes, then the dashboard reloads and shows how many PRs were updated and how many GitHub API requests were used. The **Lookback** field sets both how many days of PR activity Sync imports (for example 30 or 90 for a first import) and the window the dashboard shows.
+
+After each sync the data is also saved as a [snapshot](#44-snapshots-keep-data-without-re-fetching) in `./snapshots`, so it comes back automatically even after `docker compose down -v` or a rebuild.
 
 Just want to look around? [Load the sample data](#43-load-sample-demo-data) instead.
 
@@ -163,6 +165,9 @@ All settings are environment variables. The backend reads them from `.env` in th
 | `OLLAMA_BASE_URL` | no | `http://localhost:11434` (local) / `http://host.docker.internal:11434` (Compose) | Ollama server (tier 2) |
 | `OLLAMA_MODEL` | no | `qwen2.5-coder:14b` | Ollama model name |
 | `DEVELOPER_ANALYTICS_AI_URL` / `_TOKEN` / `_MODEL` | no | – | Optional OpenAI-compatible chat-completions endpoint for the developer *overview narrative*. If unset, a rule-based narrative is used |
+| `SNAPSHOT_DIR` | no | `snapshots` | Where snapshots are written (`./snapshots` on the host with Docker Compose) |
+| `SNAPSHOT_AUTOLOAD` | no | `true` | Load the newest snapshot at startup when the database has no pull requests |
+| `SNAPSHOT_AFTER_SYNC` | no | `true` | Save a snapshot automatically after every successful sync |
 
 ### 3.2 Metric thresholds
 
@@ -220,14 +225,18 @@ teams:
 
 Click **⟳ Sync from GitHub**. Ingestion imports every PR (open, closed or merged) that was **updated within the Lookback window**, for all active repositories, limited to team members if `teams` is configured. That includes its reviews, review comments, PR comments and commits. Re-running is safe: existing rows are updated, never duplicated. Only one sync runs at a time; a second request while one is running gets `409 Conflict`.
 
+**Re-syncs are incremental.** Each stored PR remembers GitHub's `updatedAt`. On the next sync, PRs whose `updatedAt` hasn't changed are not downloaded again; only new or changed PRs are fetched and upserted. The sync message and the log report the numbers, for example `Sync complete: 3 PR(s) updated, 41 unchanged (not downloaded again), 2 GitHub API request(s)`.
+
+Tick **Full refresh on sync** (or send `"full_refresh": true`) to download every PR in the window again. You need this after adding a new member to `teams`: their reviews on PRs that are already stored are only picked up when those PRs are re-downloaded.
+
 ### 4.2 Sync from the command line
 
 ```bash
 curl -X POST http://localhost:8000/api/ingest \
   -H "Content-Type: application/json" \
-  -d '{"lookback_days": 30}'
+  -d '{"lookback_days": 30}'          # add "full_refresh": true to re-download everything
 
-# Poll until it reports "idle"
+# Poll until it reports "idle"; "last_run" holds the statistics of the last sync
 curl http://localhost:8000/api/ingest/status
 ```
 
@@ -253,7 +262,17 @@ To wipe **all** data (sample and synced) and start clean:
 docker compose exec db psql -U git_user -d git_analysis -f /scripts/clear_data.sql
 ```
 
-Then refresh the dashboard (**↺ Refresh**).
+Then refresh the dashboard (**↺ Refresh**). An empty database is refilled from the newest snapshot on the next start; delete the files in `./snapshots/` too if you want it to stay empty.
+
+### 4.4 Snapshots: keep data without re-fetching
+
+The PostgreSQL volume already keeps data between `docker compose stop` / `up`. Snapshots also cover `docker compose down -v`, rebuilds, and moving the app to another machine:
+
+- **Saved automatically after every successful sync**, or on demand with **Save snapshot** in the header (`POST /api/snapshots`). Files are gzipped JSON in `./snapshots/` (`snapshot-<UTC time>.json.gz`); the newest 5 are kept.
+- **Loaded automatically at startup** when the database has no pull requests, e.g. after `docker compose down -v`. You can also restore with **Load latest snapshot** (`POST /api/snapshots/load`, optional body `{"name": "snapshot-....json.gz"}`). Loading upserts, so it never duplicates rows. After loading, team assignments are re-applied from `config.yaml`.
+- After restoring, a normal **Sync** only downloads PRs that changed on GitHub since the snapshot.
+
+To start completely fresh, delete the files in `./snapshots/` as well as running `docker compose down -v`.
 
 ---
 
@@ -381,18 +400,24 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/active-repositories` | Active repositories from `config.yaml` |
 | GET | `/api/teams` | Teams and members configured in `config.yaml` |
 | GET | `/api/config/thresholds` | Active metric thresholds |
-| GET | `/api/team-performance` | Team-level PR metrics (PRs created in the last 30 days) |
-| GET | `/api/dora/team` | Team DORA-inspired metrics (30 days) + 8-week trends |
-| GET | `/api/developers` | All known developers |
+| GET | `/api/team-performance` | Team-level PR metrics |
+| GET | `/api/dora/team` | Team DORA-inspired metrics and weekly trends, including ghost merges |
+| GET | `/api/developers` | Known developers |
 | GET | `/api/developers/{username}` | Aggregate metrics for one developer |
-| GET | `/api/developers/{username}/analytics` | Review analytics + AI/heuristic summary for one developer |
+| GET | `/api/developers/{username}/analytics` | Review analytics + AI/heuristic summary for one developer (all stored PRs) |
 | GET | `/api/developers/{username}/dora` | DORA-inspired metrics for one developer |
-| GET | `/api/chart/pr-cycle-by-developer` | Avg cycle time per developer (30 days) |
-| GET | `/api/chart/prs-per-week` | Merged PRs per ISO week (6 weeks); optional `?developer=<username>` |
+| GET | `/api/chart/pr-cycle-by-developer` | Avg cycle time per developer |
+| GET | `/api/chart/prs-per-week` | Merged PRs per ISO week; optional `?developer=<username>` |
+| POST | `/api/ingest` | Start a GitHub sync in the background. Body: `{"lookback_days": 7, "full_refresh": false}`. Returns `202`, or `409` if one is already running |
+| GET | `/api/ingest/status` | `running` or `idle`, plus `last_run` statistics (PRs updated, unchanged, GitHub requests, snapshot saved) |
+| GET | `/api/snapshots` | Saved snapshots, newest first |
+| POST | `/api/snapshots` | Save a snapshot of the current data |
+| POST | `/api/snapshots/load` | Load the newest snapshot (or `{"name": ...}`), upserting into the database |
 
-The team-level endpoints (`/api/team-performance`, `/api/dora/team`, `/api/developers`, `/api/chart/*`) accept an optional `?team=<TeamName>` to scope results to one configured team. An unknown team returns `404`. Without it, they cover all configured teams, or everyone when no teams are configured.
-| POST | `/api/ingest` | Start a GitHub sync in the background. Body: `{"lookback_days": 7}`. Returns `202`, or `409` if one is already running |
-| GET | `/api/ingest/status` | `running` or `idle` |
+Query parameters:
+
+- `?days=N` (default `30`): the window, i.e. PRs created or merged in the last N days. Applies to `/api/team-performance`, `/api/dora/*`, `/api/developers/{username}/dora` and `/api/chart/*`. The dashboard sends its **Lookback** value.
+- `?team=<TeamName>`: scopes the team-level endpoints (`/api/team-performance`, `/api/dora/team`, `/api/developers`, `/api/chart/*`) to one configured team. An unknown team returns `404`. Without it, they cover all configured teams, or everyone when no teams are configured.
 
 > **Security note:** the API has **no authentication**. Anyone who can reach the port can read the metrics and trigger syncs (which use your GitHub token's rate limit). Run it on a trusted network or behind an authenticating reverse proxy.
 
@@ -410,13 +435,16 @@ This project only sees GitHub data (PRs, reviews, comments, commits), not deploy
 | **Review coverage** | % of PRs with at least one review or review comment |
 | **Approval rate** | % of reviewed PRs with at least one approval |
 | **Change-failure proxy** | % of merged PRs that received a "changes requested" review |
+| **Ghost merges** | Merged PRs that nobody other than the author reviewed (no review from another person, so no approval either); count and % of merged PRs |
 | **Recovery time** | For PRs with requested changes: last review feedback → merge |
 | **Rework after feedback** | Commits pushed after the first review feedback |
 | **First follow-up** | First review feedback → the author's next commit |
 | **Comment themes** | Review comments sorted into style / correctness / testing / maintainability / performance / security by keyword |
 | **Languages** | Taken from the file extensions of commented files |
 
-Team metrics use PRs **created** in the last 30 days. Developer analytics use all stored PRs for that developer.
+The dashboard window is the **Lookback** value: metrics include PRs **created or merged** in the last N days. Merge-based figures (merges, lead time, ghost merges, weekly trends, PRs merged per week) count PRs **merged** in the window. The developer review analytics (Summary / AI Metrics / Reviewers tabs) use all stored PRs for that developer.
+
+The **Provider** tag on a developer's card names the analyzer that produced the AI metrics: e.g. `Ollama (qwen2.5-coder:14b)`, `OpenAI (gpt-4o)`, `Gemini (gemini-1.5-pro)`, or `Rule-based (heuristic)`. It shows `..., partly heuristic` when the LLM left some fields empty and they were filled by the rule-based analyzer.
 
 ---
 
@@ -428,6 +456,7 @@ app/
   config.py             Settings (environment / .env)
   config_loader.py      Reads config.yaml (repositories)
   teams.py              Reads config.yaml teams, member filter, skipped-author log
+  snapshot.py           Save / load data snapshots (gzipped JSON)
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
@@ -440,6 +469,8 @@ frontend/               React + Vite dashboard (src/components/GitAnalyticsDashb
 scripts/                seed_data.sql (demo data), clear_data.sql (wipe data)
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse
+snapshots/              Data snapshots (created by the app; git-ignored)
+docker/entrypoint.sh    Container entrypoint: makes ./snapshots writable, then drops root
 Dockerfile              Multi-stage build: UI (Node) + API (Python) in one image
 docker-compose.yml      PostgreSQL + app (+ optional Ollama)
 ```
@@ -477,5 +508,6 @@ npm run build
 | `port is already allocated` | Set `APP_PORT` or `POSTGRES_PORT` in `.env` |
 | `Could not create unique index ...` warning on startup | An older version stored duplicate PRs. Run `scripts/clear_data.sql` and sync again |
 | Logs say `LocalOllamaHandler returned no usable analysis` | The model answered without usable values (e.g. all `null`), so the rule-based analysis is used. Partial answers are kept, and missing fields are filled from the rule-based analysis (logged as `... filled from the heuristic analysis`). Small models do this more often; try a larger `OLLAMA_MODEL` or Ollama 0.5+, which supports the JSON schema the app sends |
+| `Could not write snapshot: Permission denied` | The container fixes `./snapshots` ownership at startup; if your setup blocks that (e.g. rootless Docker or SELinux), run `chmod 777 snapshots` on the host, or use `:z` on the volume under SELinux |
 | Logs say `Ollama is not reachable` | See [AI analysis](#6-ai-analysis-optional). From Docker, Ollama on the host must be reachable at `host.docker.internal:11434` (on Linux start it with `OLLAMA_HOST=0.0.0.0`) |
 | UI on port 5173 shows "Failed to load data" | The backend isn't running on port 8000, or set `VITE_API_PROXY_TARGET` |

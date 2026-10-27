@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5-coder:14b"
 
+    # Snapshots of the ingested data (see app/snapshot.py).
+    snapshot_dir: str = "snapshots"
+    # Load the newest snapshot at startup when the database has no pull requests.
+    snapshot_autoload: bool = True
+    # Save a snapshot automatically after every successful sync.
+    snapshot_after_sync: bool = True
+
     # ---------------------------------------------------------------------------
     # Metric thresholds (all configurable via .env)
     # ---------------------------------------------------------------------------

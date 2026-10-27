@@ -66,9 +66,9 @@ class RunIngestionTests(unittest.TestCase):
         config_path = self._write_config("repositories: []\n")  # no teams: everyone is ingested
         with patch("app.ingest.GitHubIngestionService") as service:
             service.return_value.fetch_all.return_value = [self._pr_payload("First title")]
-            self.assertEqual(run_ingestion(self.session, config_path=config_path), 1)
+            self.assertEqual(run_ingestion(self.session, config_path=config_path).upserted, 1)
             service.return_value.fetch_all.return_value = [self._pr_payload("Updated title")]
-            self.assertEqual(run_ingestion(self.session, config_path=config_path), 1)
+            self.assertEqual(run_ingestion(self.session, config_path=config_path).upserted, 1)
 
         self.assertEqual(self.session.query(PullRequest).count(), 1)
         self.assertEqual(self.session.query(PullRequest).one().title, "Updated title")
@@ -76,6 +76,28 @@ class RunIngestionTests(unittest.TestCase):
         self.assertEqual(self.session.query(Commit).count(), 1)
         self.assertEqual(self.session.query(PullRequestComment).count(), 1)
         self.assertEqual(self.session.query(Developer).count(), 1)
+
+    def test_ingestion_passes_stored_updated_at_and_reports_stats(self):
+        config_path = self._write_config("repositories: []\n")
+        payload = self._pr_payload("PR")
+        payload["updated_at"] = "2026-03-02T10:00:00Z"
+        with patch("app.ingest.GitHubIngestionService") as service:
+            service.return_value.fetch_all.return_value = [payload]
+            service.return_value.unchanged_count = 0
+            service.return_value.request_count = 3
+            first = run_ingestion(self.session, config_path=config_path)
+            service.return_value.fetch_all.return_value = []
+            service.return_value.unchanged_count = 1
+            service.return_value.request_count = 1
+            second = run_ingestion(self.session, config_path=config_path)
+            known = service.call_args.kwargs["known_updated_at"]
+            run_ingestion(self.session, config_path=config_path, full_refresh=True)
+            full_refresh_known = service.call_args.kwargs["known_updated_at"]
+
+        self.assertEqual((first.upserted, first.github_requests), (1, 3))
+        self.assertEqual((second.upserted, second.unchanged, second.github_requests), (0, 1, 1))
+        self.assertEqual(known, {("org/repo", 5): datetime(2026, 3, 2, 10, 0)})
+        self.assertIsNone(full_refresh_known)
 
     def test_ingestion_assigns_teams_and_skips_non_members(self):
         config_path = self._write_config(
@@ -86,7 +108,7 @@ class RunIngestionTests(unittest.TestCase):
                 self._pr_payload("Member PR", author="alice", pr_number=1),
                 self._pr_payload("Outsider PR", author="mallory", pr_number=2),
             ]
-            self.assertEqual(run_ingestion(self.session, config_path=config_path), 1)
+            self.assertEqual(run_ingestion(self.session, config_path=config_path).upserted, 1)
 
         self.assertEqual(service.call_args.kwargs["team_config"].team_names, ["GrowthTeam", "IppPayFac"])
         self.assertEqual(self.session.query(PullRequest).count(), 1)

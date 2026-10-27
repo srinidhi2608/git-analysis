@@ -24,15 +24,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+HEURISTIC_PROVIDER = "Rule-based (heuristic)"
+
+
 class DeveloperAnalysisResult(BaseModel):
     coding_standards_score: float
     design_patterns_summary: str
     dry_vs_wet_observations: str
     reviewer_rigor_score: float
     actionable_feedback: list[str]
+    # Which analyzer produced the result, shown as the dashboard's "Provider" tag.
+    provider: str = HEURISTIC_PROVIDER
 
 
-ANALYSIS_FIELDS = tuple(DeveloperAnalysisResult.model_fields)
+ANALYSIS_FIELDS = tuple(name for name in DeveloperAnalysisResult.model_fields if name != "provider")
 _NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 
 
@@ -96,7 +101,9 @@ class LLMAnalysis(BaseModel):
             ]
         )
 
-    def complete_with(self, fallback: DeveloperAnalysisResult) -> tuple[DeveloperAnalysisResult, list[str]]:
+    def complete_with(
+        self, fallback: DeveloperAnalysisResult, provider: str = ""
+    ) -> tuple[DeveloperAnalysisResult, list[str]]:
         """Fill missing fields from ``fallback``; returns the result and the filled field names."""
         values: dict[str, Any] = {}
         filled: list[str] = []
@@ -106,6 +113,8 @@ class LLMAnalysis(BaseModel):
                 value = getattr(fallback, name)
                 filled.append(name)
             values[name] = value
+        if provider:
+            values["provider"] = f"{provider}, partly heuristic" if filled else provider
         return DeveloperAnalysisResult(**values), filled
 
 
@@ -115,6 +124,11 @@ class LLMAnalysis(BaseModel):
 
 
 class BaseMetricsAnalyzer(abc.ABC):
+    @property
+    def provider_label(self) -> str:
+        """Human-readable provider name shown in the dashboard."""
+        return type(self).__name__
+
     @abc.abstractmethod
     async def analyze_developer_metrics(
         self,
@@ -219,6 +233,12 @@ class OnlineAIHandler(BaseMetricsAnalyzer):
     """Calls a remote OpenAI-compatible chat API (e.g. Gemini via openai SDK shim,
     OpenAI, Azure OpenAI, etc.)."""
 
+    @property
+    def provider_label(self) -> str:
+        model = settings.online_ai_model
+        vendor = "Gemini" if model.startswith("gemini") else "OpenAI"
+        return f"{vendor} ({model})"
+
     async def analyze_developer_metrics(
         self,
         developer: str,
@@ -276,6 +296,10 @@ class OnlineAIHandler(BaseMetricsAnalyzer):
 class LocalOllamaHandler(BaseMetricsAnalyzer):
     """Sends requests to a local Ollama instance at OLLAMA_BASE_URL."""
 
+    @property
+    def provider_label(self) -> str:
+        return f"Ollama ({settings.ollama_model})"
+
     async def analyze_developer_metrics(
         self,
         developer: str,
@@ -317,6 +341,10 @@ class LocalOllamaHandler(BaseMetricsAnalyzer):
 
 class HeuristicFallbackHandler(BaseMetricsAnalyzer):
     """Deterministic rule-based analyzer that never fails."""
+
+    @property
+    def provider_label(self) -> str:
+        return HEURISTIC_PROVIDER
 
     async def analyze_developer_metrics(
         self,
@@ -461,7 +489,7 @@ async def _run_llm_tier(
         return None
 
     heuristic = await HeuristicFallbackHandler().analyze_developer_metrics(developer, pr_data, review_comments)
-    result, filled = llm_result.complete_with(heuristic)
+    result, filled = llm_result.complete_with(heuristic, provider=handler.provider_label)
     if filled:
         logger.info(
             "%s left %s empty for %s; filled from the heuristic analysis.", name, ", ".join(filled), developer

@@ -114,6 +114,7 @@ class DispatcherTests(unittest.TestCase):
         with self.assertLogs("app.ai_analyzers", level="INFO") as logs:
             result = self._run_with_ollama_answer(ALL_NULL)
         self.assertEqual(result, _heuristic())
+        self.assertEqual(result.provider, "Rule-based (heuristic)")
         output = "\n".join(logs.output)
         self.assertIn("returned no usable analysis", output)
         self.assertNotIn("validation error", output)
@@ -126,6 +127,27 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(result.design_patterns_summary, "Clear service layering.")
         self.assertEqual(result.coding_standards_score, heuristic.coding_standards_score)
         self.assertEqual(result.actionable_feedback, heuristic.actionable_feedback)
+        self.assertEqual(result.provider, f"Ollama ({ai_analyzers.settings.ollama_model}), partly heuristic")
+
+    def test_complete_answer_reports_ollama_provider(self):
+        result = self._run_with_ollama_answer(
+            json.dumps(
+                {
+                    "coding_standards_score": 8,
+                    "design_patterns_summary": "a",
+                    "dry_vs_wet_observations": "b",
+                    "reviewer_rigor_score": 7,
+                    "actionable_feedback": ["c"],
+                }
+            )
+        )
+        self.assertEqual(result.provider, f"Ollama ({ai_analyzers.settings.ollama_model})")
+
+    def test_online_provider_label_names_vendor_and_model(self):
+        with patch.object(ai_analyzers.settings, "online_ai_model", "gemini-1.5-pro"):
+            self.assertEqual(ai_analyzers.OnlineAIHandler().provider_label, "Gemini (gemini-1.5-pro)")
+        with patch.object(ai_analyzers.settings, "online_ai_model", "gpt-4o"):
+            self.assertEqual(ai_analyzers.OnlineAIHandler().provider_label, "OpenAI (gpt-4o)")
 
 
 class OllamaHandlerTests(unittest.TestCase):

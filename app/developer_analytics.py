@@ -13,7 +13,7 @@ import requests
 from sqlalchemy.orm import Session, load_only, selectinload
 from starlette.concurrency import run_in_threadpool
 
-from app.ai_analyzers import get_developer_analyzer
+from app.ai_analyzers import HEURISTIC_PROVIDER, get_developer_analyzer
 from app.config import settings
 from app.models import Commit, Developer, PullRequest, PullRequestComment
 
@@ -666,6 +666,10 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
         if not strengths:
             strengths = summary.get("highlights", [])
 
+        # The overview text comes from the narrator; the AI tier that analysed the
+        # review comments is the provider shown on the dashboard.
+        summary["narrative_provider"] = summary.get("provider", "")
+        summary["provider"] = ai_result.provider
         summary["coding_standards_score"] = ai_result.coding_standards_score
         summary["design_patterns_summary"] = ai_result.design_patterns_summary
         summary["dry_vs_wet_observations"] = ai_result.dry_vs_wet_observations
@@ -674,6 +678,8 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
         summary["improvement_areas"] = list(ai_result.actionable_feedback)
     except Exception:
         logger.exception("AI analyzer enrichment failed for %s. Using heuristic summary only.", github_username)
+        summary["narrative_provider"] = summary.get("provider", "")
+        summary["provider"] = HEURISTIC_PROVIDER
         summary["coding_standards_score"] = None
         summary["design_patterns_summary"] = ""
         summary["dry_vs_wet_observations"] = ""

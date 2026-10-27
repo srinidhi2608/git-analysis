@@ -53,6 +53,9 @@ class PullRequest(Base):
     review_decision: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     first_review_comment_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_review_comment_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # GitHub's updatedAt when this PR was last ingested; an unchanged value lets a
+    # re-sync skip downloading the PR's details again.
+    github_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     repository: Mapped["Repository"] = relationship("Repository", back_populates="pull_requests")
     developer: Mapped["Developer"] = relationship("Developer", back_populates="pull_requests")

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select, true
+from sqlalchemy import func, or_, select, true
 from sqlalchemy.orm import Session
 
 from app.models import Commit, Developer, PullRequest, Repository
@@ -32,7 +32,7 @@ def get_pull_request_counts_by_user_story(db: Session):
 
 
 def get_team_performance_metrics(db: Session, days: int = 30, teams: list[str] | None = None):
-    """Return team-level metrics for pull requests created in the last N days."""
+    """Return team-level metrics for pull requests created or merged in the last N days."""
     since = _utc_now_naive() - timedelta(days=days)
     team_name = func.coalesce(Developer.team_name, "Unassigned").label("team_name")
 
@@ -43,7 +43,7 @@ def get_team_performance_metrics(db: Session, days: int = 30, teams: list[str] |
             func.count(PullRequest.id).label("total_prs"),
         )
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .where(PullRequest.created_at >= since, _in_teams(teams))
+        .where(or_(PullRequest.created_at >= since, PullRequest.merged_at >= since), _in_teams(teams))
         .group_by(team_name)
         .subquery()
     )
@@ -56,7 +56,7 @@ def get_team_performance_metrics(db: Session, days: int = 30, teams: list[str] |
         .select_from(Commit)
         .join(PullRequest, Commit.pr_id == PullRequest.id)
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .where(PullRequest.created_at >= since, _in_teams(teams))
+        .where(or_(PullRequest.created_at >= since, PullRequest.merged_at >= since), _in_teams(teams))
         .group_by(team_name)
         .subquery()
     )
@@ -140,7 +140,7 @@ def get_all_developers(db: Session, teams: list[str] | None = None):
 
 
 def get_pr_cycle_time_by_developer(db: Session, days: int = 30, teams: list[str] | None = None):
-    """Return average PR cycle time (hours) per developer for the last N days."""
+    """Return average PR cycle time (hours) per developer for PRs merged in the last N days."""
     since = _utc_now_naive() - timedelta(days=days)
     stmt = (
         select(
@@ -148,7 +148,7 @@ def get_pr_cycle_time_by_developer(db: Session, days: int = 30, teams: list[str]
             (func.avg(PullRequest.cycle_time_minutes) / 60).label("cycleTimeHours"),
         )
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .where(PullRequest.created_at >= since)
+        .where(PullRequest.merged_at >= since)
         .where(PullRequest.cycle_time_minutes.is_not(None))
         .where(_in_teams(teams))
         .group_by(Developer.github_username)
@@ -164,11 +164,11 @@ def get_pr_cycle_time_by_developer(db: Session, days: int = 30, teams: list[str]
 def get_prs_per_week(
     db: Session,
     developer: str | None = None,
-    weeks: int = 6,
+    days: int = 42,
     teams: list[str] | None = None,
 ):
-    """Return merged PR count per ISO week label for the last N weeks."""
-    since = _utc_now_naive() - timedelta(weeks=weeks)
+    """Return merged PR count per ISO week label for PRs merged in the last N days."""
+    since = _utc_now_naive() - timedelta(days=days)
 
     stmt = (
         select(PullRequest.merged_at)

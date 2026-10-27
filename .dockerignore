@@ -32,3 +32,6 @@ docker-compose.yml
 *.md
 tests/
 scripts/
+
+# Data snapshots are mounted at runtime, not baked into the image
+snapshots/

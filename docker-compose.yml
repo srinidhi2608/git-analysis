@@ -65,6 +65,10 @@ services:
       # Mount config.yaml so you can edit active repositories without rebuilding
       # (restart the app container after editing).
       - ./config.yaml:/app/config.yaml:ro
+      # Snapshots of the synced data live on the host, so they survive
+      # `docker compose down -v` and rebuilds; the newest one is loaded at
+      # startup when the database is empty.
+      - ./snapshots:/app/snapshots
 
   # ─── Optional: local Ollama LLM ─────────────────────────────────────────────
   # docker compose --profile ollama up --build

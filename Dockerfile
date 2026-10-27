@@ -44,10 +44,14 @@ COPY config.yaml ./
 # Copy the built React app so FastAPI can serve it
 COPY --from=node-builder /build/frontend/dist ./frontend/dist/
 
-# Non-root user for security
-RUN adduser --disabled-password --gecos "" appuser && \
-    chown -R appuser:appuser /app
-USER appuser
+# Non-root user for security. The entrypoint starts as root only to make the
+# bind-mounted ./snapshots directory writable, then runs the app as appuser.
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN adduser --disabled-password --gecos "" --uid 1000 appuser && \
+    mkdir -p /app/snapshots && \
+    chown -R appuser:appuser /app && \
+    chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 EXPOSE 8000
 

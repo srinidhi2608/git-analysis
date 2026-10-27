@@ -8,6 +8,7 @@ and review comments into the database.
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -128,20 +129,51 @@ def _upsert_repository(db: Session, name: str) -> Repository:
     return repo
 
 
-def run_ingestion(db: Session, lookback_days: int = 7, config_path: str = "config.yaml") -> int:
+@dataclass
+class IngestionStats:
+    """Outcome of one sync, reported by GET /api/ingest/status."""
+
+    upserted: int = 0
+    unchanged: int = 0
+    github_requests: int = 0
+    skipped_authors: int = 0
+    full_refresh: bool = False
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def _known_updated_at(db: Session) -> dict[tuple[str, int], datetime]:
+    rows = (
+        db.query(Repository.name, PullRequest.pr_number, PullRequest.github_updated_at)
+        .join(Repository, PullRequest.repo_id == Repository.id)
+        .filter(PullRequest.github_updated_at.is_not(None))
+        .all()
+    )
+    return {(name, number): updated_at for name, number, updated_at in rows}
+
+
+def run_ingestion(
+    db: Session,
+    lookback_days: int = 7,
+    config_path: str = "config.yaml",
+    full_refresh: bool = False,
+) -> IngestionStats:
     """Fetch GitHub PR data and persist it to the database.
 
     When teams are configured in config.yaml, only data authored by team members
-    is fetched and stored (see ``app.teams``).
-
-    Returns
-    -------
-    int
-        Number of pull requests upserted.
+    is fetched and stored (see ``app.teams``). Unless ``full_refresh`` is set,
+    PRs already stored with the same GitHub ``updatedAt`` are not downloaded
+    again, which saves GitHub API requests.
     """
     team_config = load_team_config(config_path)
     sync_developer_teams(db, team_config)
-    service = GitHubIngestionService(config_path=config_path, lookback_days=lookback_days, team_config=team_config)
+    service = GitHubIngestionService(
+        config_path=config_path,
+        lookback_days=lookback_days,
+        team_config=team_config,
+        known_updated_at=None if full_refresh else _known_updated_at(db),
+    )
     prs = service.fetch_all()
     logger.info("Fetched %d pull requests from GitHub.", len(prs))
 
@@ -188,6 +220,7 @@ def run_ingestion(db: Session, lookback_days: int = 7, config_path: str = "confi
             requested_changes_count: int = pr_data.get("requested_changes_count", 0) or 0
             first_review_comment_at = _parse_dt(pr_data.get("first_review_comment_at"))
             last_review_comment_at = _parse_dt(pr_data.get("last_review_comment_at"))
+            github_updated_at = _parse_dt(pr_data.get("updated_at"))
 
             if existing is None:
                 pull_request = PullRequest(
@@ -210,6 +243,7 @@ def run_ingestion(db: Session, lookback_days: int = 7, config_path: str = "confi
                     review_decision=pr_data.get("review_decision"),
                     first_review_comment_at=first_review_comment_at,
                     last_review_comment_at=last_review_comment_at,
+                    github_updated_at=github_updated_at,
                 )
                 db.add(pull_request)
                 db.flush()
@@ -232,6 +266,7 @@ def run_ingestion(db: Session, lookback_days: int = 7, config_path: str = "confi
                 existing.review_decision = pr_data.get("review_decision")
                 existing.first_review_comment_at = first_review_comment_at
                 existing.last_review_comment_at = last_review_comment_at
+                existing.github_updated_at = github_updated_at
 
             for commit_data in pr_data.get("commits", []):
                 _upsert_commit(db, pull_request, dev, commit_data)
@@ -247,4 +282,10 @@ def run_ingestion(db: Session, lookback_days: int = 7, config_path: str = "confi
 
     db.commit()
     logger.info("Ingestion complete. %d pull requests upserted.", upserted)
-    return upserted
+    return IngestionStats(
+        upserted=upserted,
+        unchanged=service.unchanged_count,
+        github_requests=service.request_count,
+        skipped_authors=len(service.skipped.as_dict()),
+        full_refresh=full_refresh,
+    )

@@ -16,6 +16,9 @@ def _service(team_config: TeamConfig | None = None) -> GitHubIngestionService:
     service.lookback_days = 7
     service.team_config = team_config or TeamConfig()
     service.skipped = SkippedAuthors()
+    service.known_updated_at = {}
+    service.unchanged_count = 0
+    service.request_count = 0
     return service
 
 
@@ -211,6 +214,45 @@ class GitHubIngestionNormalizationTests(unittest.TestCase):
 
         sleep.assert_not_called()
         self.assertEqual(service._session.post.call_count, 1)
+
+
+    def test_fetch_skips_prs_unchanged_since_last_sync(self):
+        service = _service()
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        unchanged = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        changed = (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        service.known_updated_at = {
+            ("org/repo", 1): (now - timedelta(days=1)).replace(tzinfo=None),
+            ("org/repo", 2): (now - timedelta(days=3)).replace(tzinfo=None),
+        }
+        detail_requests: list[dict] = []
+
+        def fake_run_query(query: str, variables: dict):
+            if "pullRequests(" in query:
+                return {
+                    "data": {
+                        "repository": {
+                            "pullRequests": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {"number": 2, "updatedAt": changed, "author": {"login": "a"}},
+                                    {"number": 1, "updatedAt": unchanged, "author": {"login": "a"}},
+                                    {"number": 3, "updatedAt": unchanged, "author": {"login": "a"}},
+                                ],
+                            }
+                        }
+                    }
+                }
+            detail_requests.append(variables)
+            return {"data": {"repository": {}}}
+
+        service._run_query = fake_run_query  # type: ignore[method-assign]
+        service._fetch_repo_prs("org", "repo")
+
+        # PR 1 is unchanged and skipped; PR 2 changed and PR 3 is new.
+        self.assertEqual(len(detail_requests), 1)
+        self.assertEqual(sorted(v for k, v in detail_requests[0].items() if k.startswith("number")), [2, 3])
+        self.assertEqual(service.unchanged_count, 1)
 
 
 TEAMS = parse_team_config(
