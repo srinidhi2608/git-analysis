@@ -9,10 +9,11 @@ from __future__ import annotations
 import abc
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.config import settings
 
@@ -31,6 +32,83 @@ class DeveloperAnalysisResult(BaseModel):
     actionable_feedback: list[str]
 
 
+ANALYSIS_FIELDS = tuple(DeveloperAnalysisResult.model_fields)
+_NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+class LLMAnalysis(BaseModel):
+    """Lenient view of an LLM answer: any field may be missing, null or loosely typed.
+
+    LLMs (local models in particular) sometimes return ``null`` for fields they
+    have little evidence for, numbers as strings ("7/10") or a single string
+    instead of a list. Unusable values become ``None``; the dispatcher fills
+    them from the heuristic analysis instead of discarding the whole answer.
+    """
+
+    coding_standards_score: float | None = None
+    design_patterns_summary: str | None = None
+    dry_vs_wet_observations: str | None = None
+    reviewer_rigor_score: float | None = None
+    actionable_feedback: list[str] = []
+
+    @field_validator("coding_standards_score", "reviewer_rigor_score", mode="before")
+    @classmethod
+    def _parse_score(cls, value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            number = float(value)
+        elif isinstance(value, str):
+            match = _NUMBER_PATTERN.search(value)
+            if match is None:
+                return None
+            number = float(match.group())
+        else:
+            return None
+        if 10 < number <= 100:  # answered on a 0-100 scale
+            number /= 10
+        return round(min(10.0, max(1.0, number)), 1)
+
+    @field_validator("design_patterns_summary", "dry_vs_wet_observations", mode="before")
+    @classmethod
+    def _parse_text(cls, value: Any) -> str | None:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    @field_validator("actionable_feedback", mode="before")
+    @classmethod
+    def _parse_feedback(cls, value: Any) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+    def has_content(self) -> bool:
+        return any(
+            [
+                self.coding_standards_score is not None,
+                self.design_patterns_summary,
+                self.dry_vs_wet_observations,
+                self.reviewer_rigor_score is not None,
+                self.actionable_feedback,
+            ]
+        )
+
+    def complete_with(self, fallback: DeveloperAnalysisResult) -> tuple[DeveloperAnalysisResult, list[str]]:
+        """Fill missing fields from ``fallback``; returns the result and the filled field names."""
+        values: dict[str, Any] = {}
+        filled: list[str] = []
+        for name in ANALYSIS_FIELDS:
+            value = getattr(self, name)
+            if value is None or value == []:
+                value = getattr(fallback, name)
+                filled.append(name)
+            values[name] = value
+        return DeveloperAnalysisResult(**values), filled
+
+
 # ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
@@ -43,8 +121,12 @@ class BaseMetricsAnalyzer(abc.ABC):
         developer: str,
         pr_data: dict[str, Any],
         review_comments: list[dict[str, Any]],
-    ) -> DeveloperAnalysisResult:
-        """Analyze developer metrics and return structured insights."""
+    ) -> DeveloperAnalysisResult | LLMAnalysis:
+        """Analyze developer metrics and return structured insights.
+
+        LLM-backed handlers return a possibly incomplete :class:`LLMAnalysis`;
+        the dispatcher completes it from the heuristic analysis.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -62,8 +144,9 @@ Using ONLY that evidence, assess:
 3. DRY vs WET balance — flag copy-paste logic or over-abstraction.
 4. Review rigor — how thorough and substantive the review feedback on these PRs is (score 1-10).
 
-If the comment sample is empty or too small to support a judgement, say so explicitly in the
-text fields instead of guessing.
+Every field is required and must never be null. Scores are numbers from 1 to 10. If the
+comment sample is empty or too small for a confident judgement, still give your best estimate
+from the PR metrics and say explicitly in the text fields that the evidence is limited.
 
 Return ONLY valid JSON matching this exact schema (no prose, no markdown fences):
 {
@@ -91,14 +174,40 @@ def _build_user_message(
     )
 
 
-def _parse_llm_json(raw: str) -> DeveloperAnalysisResult:
-    """Extract JSON from a raw LLM response and parse it."""
-    raw = raw.strip()
+# JSON schema for Ollama structured outputs (`format`), mirroring _SYSTEM_PROMPT.
+_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "coding_standards_score": {"type": "number", "minimum": 1, "maximum": 10},
+        "design_patterns_summary": {"type": "string"},
+        "dry_vs_wet_observations": {"type": "string"},
+        "reviewer_rigor_score": {"type": "number", "minimum": 1, "maximum": 10},
+        "actionable_feedback": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": list(ANALYSIS_FIELDS),
+}
+
+
+def _parse_llm_json(raw: str) -> LLMAnalysis:
+    """Extract JSON from a raw LLM response and parse it leniently."""
+    text = (raw or "").strip()
     # Strip markdown code fences if present
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        raw = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
-    return DeveloperAnalysisResult.model_validate(json.loads(raw))
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.debug("Unparseable LLM response: %.500s", raw)
+        raise ValueError(f"LLM response is not valid JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"LLM response is a JSON {type(data).__name__}, expected an object")
+    # Some models wrap the answer, e.g. {"analysis": {...}}.
+    if not any(key in data for key in ANALYSIS_FIELDS):
+        nested = [value for value in data.values() if isinstance(value, dict)]
+        if len(nested) == 1:
+            data = nested[0]
+    return LLMAnalysis.model_validate(data)
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +224,7 @@ class OnlineAIHandler(BaseMetricsAnalyzer):
         developer: str,
         pr_data: dict[str, Any],
         review_comments: list[dict[str, Any]],
-    ) -> DeveloperAnalysisResult:
+    ) -> LLMAnalysis:
         if not settings.online_ai_api_key:
             raise RuntimeError("ONLINE_AI_API_KEY is not set")
 
@@ -172,9 +281,9 @@ class LocalOllamaHandler(BaseMetricsAnalyzer):
         developer: str,
         pr_data: dict[str, Any],
         review_comments: list[dict[str, Any]],
-    ) -> DeveloperAnalysisResult:
+    ) -> LLMAnalysis:
         url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
-        payload = {
+        payload: dict[str, Any] = {
             "model": settings.ollama_model,
             "stream": False,
             "messages": [
@@ -184,11 +293,17 @@ class LocalOllamaHandler(BaseMetricsAnalyzer):
                     "content": _build_user_message(developer, pr_data, review_comments),
                 },
             ],
-            "format": "json",
+            # Structured outputs: constrain the reply to the schema (no nulls).
+            "format": _RESPONSE_SCHEMA,
         }
         logger.info("Sending request to local Ollama instance at %s", url)
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(url, json=payload)
+            if response.status_code == 400:
+                # Ollama older than 0.5 only accepts format="json".
+                logger.info("Ollama rejected the JSON schema format; retrying with format=json.")
+                payload["format"] = "json"
+                response = await client.post(url, json=payload)
             response.raise_for_status()
 
         content = response.json().get("message", {}).get("content", "")
@@ -328,6 +443,33 @@ async def _is_ollama_reachable() -> bool:
         return False
 
 
+async def _run_llm_tier(
+    handler: BaseMetricsAnalyzer,
+    developer: str,
+    pr_data: dict[str, Any],
+    review_comments: list[dict[str, Any]],
+) -> DeveloperAnalysisResult | None:
+    """Run an LLM handler; returns ``None`` when it fails or gives nothing usable."""
+    name = type(handler).__name__
+    try:
+        llm_result = await handler.analyze_developer_metrics(developer, pr_data, review_comments)
+    except Exception as exc:
+        logger.warning("%s failed for %s: %s", name, developer, exc)
+        return None
+    if not isinstance(llm_result, LLMAnalysis) or not llm_result.has_content():
+        logger.warning("%s returned no usable analysis for %s.", name, developer)
+        return None
+
+    heuristic = await HeuristicFallbackHandler().analyze_developer_metrics(developer, pr_data, review_comments)
+    result, filled = llm_result.complete_with(heuristic)
+    if filled:
+        logger.info(
+            "%s left %s empty for %s; filled from the heuristic analysis.", name, ", ".join(filled), developer
+        )
+    logger.info("Developer metrics analyzed via %s for %s.", name, developer)
+    return result
+
+
 async def get_developer_analyzer(
     developer: str,
     pr_data: dict[str, Any],
@@ -338,42 +480,25 @@ async def get_developer_analyzer(
       1. OnlineAIHandler  (if ONLINE_AI_ENABLED=True and API key present)
       2. LocalOllamaHandler (if Ollama is reachable)
       3. HeuristicFallbackHandler (always succeeds)
+
+    A tier whose answer is partly missing is completed from the heuristic
+    analysis; a tier that fails or answers with nothing usable falls through.
     """
     # Tier 1: Online AI
     if settings.online_ai_enabled and settings.online_ai_api_key:
-        try:
-            handler: BaseMetricsAnalyzer = OnlineAIHandler()
-            result = await handler.analyze_developer_metrics(developer, pr_data, review_comments)
-            logger.info("Developer metrics analyzed via OnlineAIHandler for %s.", developer)
+        result = await _run_llm_tier(OnlineAIHandler(), developer, pr_data, review_comments)
+        if result is not None:
             return result
-        except Exception as exc:
-            logger.warning(
-                "OnlineAIHandler failed for %s (%s). Falling back to LocalOllamaHandler.",
-                developer,
-                exc,
-            )
 
     # Tier 2: Local Ollama
     if await _is_ollama_reachable():
-        try:
-            handler = LocalOllamaHandler()
-            result = await handler.analyze_developer_metrics(developer, pr_data, review_comments)
-            logger.info("Developer metrics analyzed via LocalOllamaHandler for %s.", developer)
+        result = await _run_llm_tier(LocalOllamaHandler(), developer, pr_data, review_comments)
+        if result is not None:
             return result
-        except Exception as exc:
-            logger.warning(
-                "LocalOllamaHandler failed for %s (%s). Falling back to HeuristicFallbackHandler.",
-                developer,
-                exc,
-            )
     else:
-        logger.warning(
-            "Ollama is not reachable at %s. Falling back to HeuristicFallbackHandler.",
-            settings.ollama_base_url,
-        )
+        logger.warning("Ollama is not reachable at %s.", settings.ollama_base_url)
 
     # Tier 3: Heuristic fallback (always succeeds)
-    handler = HeuristicFallbackHandler()
-    result = await handler.analyze_developer_metrics(developer, pr_data, review_comments)
+    result = await HeuristicFallbackHandler().analyze_developer_metrics(developer, pr_data, review_comments)
     logger.info("Developer metrics analyzed via HeuristicFallbackHandler for %s.", developer)
     return result
