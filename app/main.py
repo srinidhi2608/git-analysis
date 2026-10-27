@@ -1,9 +1,11 @@
+import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Awaitable, TypeVar
 
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +30,11 @@ from app.teams import load_team_config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 active_repos: list = []
+T = TypeVar("T")
+# How often a long-running request checks whether the browser has gone away.
+DISCONNECT_POLL_SECONDS = 0.5
+# Non-standard "Client Closed Request" status (nginx convention); the client never sees it.
+CLIENT_CLOSED_REQUEST = 499
 # Only one ingestion may run at a time; concurrent runs would race on upserts.
 _ingestion_lock = threading.Lock()
 
@@ -325,9 +332,40 @@ def developer_metrics(github_username: str, db: Session = Depends(get_db)):
     return metrics
 
 
+async def cancel_on_disconnect(request: Request, work: Awaitable[T]) -> T:
+    """Await ``work``, cancelling it if the client disconnects first.
+
+    The dashboard aborts the analytics request when the user picks another
+    developer. Cancelling here closes the in-flight LLM HTTP call too, so an
+    abandoned analysis does not keep the LLM (e.g. Ollama, which generates one
+    response at a time) busy ahead of the developer that was selected next.
+    """
+    task = asyncio.ensure_future(work)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=DISCONNECT_POLL_SECONDS)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise HTTPException(status_code=CLIENT_CLOSED_REQUEST, detail="Client closed request")
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 @app.get("/api/developers/{github_username}/analytics", response_model=DeveloperAnalyticsResponse)
-async def developer_analytics(github_username: str, db: Session = Depends(get_db)):
-    analytics = await get_developer_review_analytics(db, github_username)
+async def developer_analytics(github_username: str, request: Request, db: Session = Depends(get_db)):
+    try:
+        analytics = await cancel_on_disconnect(request, get_developer_review_analytics(db, github_username))
+    except HTTPException as exc:
+        if exc.status_code == CLIENT_CLOSED_REQUEST:
+            logger.info("Analytics request for %s cancelled: the client disconnected.", github_username)
+        raise
     if analytics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return analytics
