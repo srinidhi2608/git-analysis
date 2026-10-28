@@ -1,11 +1,15 @@
+import logging
 import re
 
 from sqlalchemy import DateTime, Integer, String, create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
 
-engine = create_engine(settings.database_url)
+logger = logging.getLogger(__name__)
+
+engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
@@ -46,6 +50,34 @@ def _apply_column_alterations(connection, table_name: str, existing_columns: set
             )
 
 
+# Unique indexes that older databases (created before the constraints were added
+# to the models) may be missing. Fresh databases get them from create_all().
+UNIQUE_INDEXES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "uq_pull_requests_repo_pr_number": ("pull_requests", ("repo_id", "pr_number")),
+    "uq_commits_pr_commit_hash": ("commits", ("pr_id", "commit_hash")),
+}
+
+
+def _ensure_unique_indexes() -> None:
+    for index_name, (table_name, columns) in UNIQUE_INDEXES.items():
+        column_list = ", ".join(_quoted_identifier(column) for column in columns)
+        statement = text(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {_quoted_identifier(index_name)} "
+            f"ON {_quoted_identifier(table_name)} ({column_list})"
+        )
+        try:
+            with engine.begin() as connection:
+                connection.execute(statement)
+        except (IntegrityError, ProgrammingError):
+            logger.warning(
+                "Could not create unique index %s on %s%s because the table already contains duplicate rows. "
+                "Run scripts/clear_data.sql and re-sync to remove duplicates.",
+                index_name,
+                table_name,
+                columns,
+            )
+
+
 def ensure_database_schema():
     Base.metadata.create_all(bind=engine)
 
@@ -68,6 +100,7 @@ def ensure_database_schema():
         "review_decision": _compile_column_definition(String(64)),
         "first_review_comment_at": _compile_column_definition(DateTime()),
         "last_review_comment_at": _compile_column_definition(DateTime()),
+        "github_updated_at": _compile_column_definition(DateTime()),
     }
     commit_alterations = {
         "committed_at": _compile_column_definition(DateTime()),
@@ -83,6 +116,8 @@ def ensure_database_schema():
             pull_request_comment_columns,
             pull_request_comment_alterations,
         )
+
+    _ensure_unique_indexes()
 
 
 def get_db():

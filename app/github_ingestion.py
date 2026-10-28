@@ -1,7 +1,8 @@
 """GitHub GraphQL ingestion service.
 
-Fetches closed Pull Requests from the GitHub GraphQL API for each active
-repository listed in config.yaml, covering the last 7 days.
+Fetches Pull Requests (open, closed and merged) from the GitHub GraphQL API
+for each active repository listed in config.yaml, limited to PRs that had
+activity (were updated) within the lookback window.
 """
 
 from __future__ import annotations
@@ -15,17 +16,15 @@ import requests
 
 from app.config import settings
 from app.config_loader import load_active_repositories
+from app.teams import SkippedAuthors, TeamConfig, load_team_config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 
 # GraphQL query: paginate PR shells first to avoid GitHub's nested-node limit.
+# Ordered by most recently updated so pagination can stop at the lookback cutoff.
 PR_LIST_QUERY = """
 query($owner: String!, $repo: String!, $after: String) {
   repository(owner: $owner, name: $repo) {
@@ -33,6 +32,7 @@ query($owner: String!, $repo: String!, $after: String) {
       states: [CLOSED, MERGED, OPEN]
       first: 100
       after: $after
+      orderBy: {field: UPDATED_AT, direction: DESC}
     ) {
       pageInfo {
         hasNextPage
@@ -40,8 +40,8 @@ query($owner: String!, $repo: String!, $after: String) {
       }
       nodes {
         number
-        mergedAt
-        closedAt
+        updatedAt
+        author { login }
       }
     }
   }
@@ -51,6 +51,7 @@ query($owner: String!, $repo: String!, $after: String) {
 PR_DETAIL_SELECTION = """
 number
 title
+updatedAt
 createdAt
 mergedAt
 closedAt
@@ -94,6 +95,7 @@ commits(first: 100) {
       oid
       message
       committedDate
+      author { user { login } }
     }
   }
 }
@@ -116,11 +118,30 @@ class GitHubIngestionService:
         Path to the YAML file that lists active repositories.
     lookback_days:
         How many days back to fetch PRs for (default 7).
+    team_config:
+        Team membership. When teams are configured, PRs, reviews, comments and
+        commits authored by anyone who is not a listed member are skipped (and
+        reported via ``skipped``). Loaded from ``config_path`` when omitted.
+    known_updated_at:
+        ``{("owner/repo", pr_number): updatedAt}`` of PRs already stored. PRs whose
+        GitHub ``updatedAt`` is unchanged are not downloaded again (counted in
+        ``unchanged_count``). Pass ``None`` to refetch everything.
     """
 
-    def __init__(self, config_path: str = "config.yaml", lookback_days: int = 7) -> None:
+    def __init__(
+        self,
+        config_path: str = "config.yaml",
+        lookback_days: int = 7,
+        team_config: TeamConfig | None = None,
+        known_updated_at: dict[tuple[str, int], datetime] | None = None,
+    ) -> None:
         self.config_path = config_path
         self.lookback_days = lookback_days
+        self.team_config = team_config if team_config is not None else load_team_config(config_path)
+        self.skipped = SkippedAuthors()
+        self.known_updated_at = known_updated_at or {}
+        self.unchanged_count = 0
+        self.request_count = 0
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -142,6 +163,14 @@ class GitHubIngestionService:
             One dict per pull request, across all repositories.
         """
         repos = load_active_repositories(self.config_path)
+        self.skipped = SkippedAuthors()
+        self.unchanged_count = 0
+        self.request_count = 0
+        if self.team_config.enabled:
+            logger.info(
+                "Team filter active: only ingesting data from members of %s.",
+                ", ".join(self.team_config.team_names),
+            )
         results: list[dict[str, Any]] = []
         for repo_entry in repos:
             repo_name: str = repo_entry["name"]
@@ -153,10 +182,14 @@ class GitHubIngestionService:
             logger.info("Fetching PRs for %s", repo_name)
             prs = self._fetch_repo_prs(owner, name)
             logger.info("Fetched %d PRs for %s", len(prs), repo_name)
-            #display pr title 
-            for pr in prs:
-                logger.info("PR title: %s", pr.get("title", ""))
             results.extend(prs)
+        self.skipped.log_summary()
+        logger.info(
+            "GitHub sync used %d API request(s); %d PR(s) fetched, %d unchanged PR(s) not downloaded again.",
+            self.request_count,
+            len(results),
+            self.unchanged_count,
+        )
         return results
 
     # ------------------------------------------------------------------
@@ -180,22 +213,33 @@ class GitHubIngestionService:
             page_info: dict = pr_connection["pageInfo"]
 
             recent_pr_numbers: list[int] = []
+            reached_cutoff = False
             for node in nodes:
-                # Use mergedAt if available, otherwise closedAt, to determine recency.
-                relevant_date_str: str | None = node.get("mergedAt") or node.get("closedAt") or node.get("createdAt")
-                if not relevant_date_str:
+                updated_at_str: str | None = node.get("updatedAt")
+                if not updated_at_str:
                     continue
-                relevant_date = datetime.fromisoformat(relevant_date_str.replace("Z", "+00:00"))
-                # Filter client-side: ordering by UPDATED_AT means we cannot stop
-                # pagination early based on mergedAt/closedAt alone.
-                if relevant_date >= since:
-                    recent_pr_numbers.append(node["number"])
+                updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+                if updated_at < since:
+                    # Results are ordered by updatedAt DESC, so every later PR is older too.
+                    reached_cutoff = True
+                    break
+                author_login = (node.get("author") or {}).get("login")
+                if not self.team_config.is_member(author_login):
+                    # Not a team member: do not download the PR's details at all.
+                    self.skipped.record(author_login, "pull_request", f"{owner}/{repo}")
+                    continue
+                known = self.known_updated_at.get((f"{owner}/{repo}", node["number"]))
+                if known is not None and known == updated_at.replace(tzinfo=None):
+                    # Stored copy is current: save the detail request.
+                    self.unchanged_count += 1
+                    continue
+                recent_pr_numbers.append(node["number"])
 
             for pr_number_batch in self._chunked(recent_pr_numbers, DETAIL_BATCH_SIZE):
                 for detailed_node in self._fetch_pr_details_batch(owner, repo, pr_number_batch):
                     prs.append(self._normalize_pr(owner, repo, detailed_node))
 
-            if not page_info["hasNextPage"]:
+            if reached_cutoff or not page_info["hasNextPage"]:
                 break
             cursor = page_info["endCursor"]
 
@@ -324,6 +368,37 @@ query({", ".join(variable_definitions)}) {{
                 }
             )
 
+        repository = f"{owner}/{repo}"
+        member_comments: list[dict[str, Any]] = []
+        for comment in comments:
+            if self.team_config.is_member(comment.get("author_login")):
+                member_comments.append(comment)
+            else:
+                kind = "review" if comment["comment_type"] == "review" else "comment"
+                self.skipped.record(comment.get("author_login"), kind, repository)
+
+        member_commits: list[dict[str, Any]] = []
+        for commit_node in commit_nodes:
+            commit = commit_node.get("commit") or {}
+            if not commit.get("oid"):
+                continue
+            # Commits whose author email is not linked to a GitHub account have no
+            # login; they are attributed to the PR author.
+            commit_login = ((commit.get("author") or {}).get("user") or {}).get("login")
+            if commit_login and not self.team_config.is_member(commit_login):
+                self.skipped.record(commit_login, "commit", repository)
+                continue
+            member_commits.append(
+                {
+                    "commit_hash": commit["oid"],
+                    "message": commit.get("message") or "",
+                    "committed_at": commit.get("committedDate"),
+                }
+            )
+
+        # PR-level review signals (counts, first/last feedback time) describe the
+        # member's PR and are kept as reported by GitHub; only the non-member
+        # authored comment text and commits are dropped above.
         feedback_timestamps = sorted(
             comment["created_at"]
             for comment in comments
@@ -346,6 +421,7 @@ query({", ".join(variable_definitions)}) {{
             "reviewers": reviewer_logins,
             "created_at": node["createdAt"],
             "merged_at": node.get("mergedAt"),
+            "updated_at": node.get("updatedAt"),
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
             "changed_files": node.get("changedFiles") or 0,
@@ -358,16 +434,8 @@ query({", ".join(variable_definitions)}) {{
             "review_decision": node.get("reviewDecision"),
             "first_review_comment_at": feedback_timestamps[0] if feedback_timestamps else None,
             "last_review_comment_at": feedback_timestamps[-1] if feedback_timestamps else None,
-            "comments": [comment for comment in comments if comment.get("external_id")],
-            "commits": [
-                {
-                    "commit_hash": commit["commit"]["oid"],
-                    "message": commit["commit"]["message"],
-                    "committed_at": commit["commit"].get("committedDate"),
-                }
-                for commit in commit_nodes
-                if commit.get("commit") and commit["commit"].get("oid")
-            ],
+            "comments": [comment for comment in member_comments if comment.get("external_id")],
+            "commits": member_commits,
         }
 
     def _run_query(self, query: str, variables: dict) -> dict[str, Any]:
@@ -382,6 +450,7 @@ query({", ".join(variable_definitions)}) {{
         """
         max_retries = 3
         for attempt in range(1, max_retries + 1):
+            self.request_count += 1
             response = self._session.post(
                 GITHUB_GRAPHQL_URL,
                 json={"query": query, "variables": variables},
@@ -408,9 +477,9 @@ query({", ".join(variable_definitions)}) {{
                     raise RuntimeError(f"GitHub GraphQL errors: {errors}")
                 return payload
 
-            if response.status_code == 403:
-                # Primary rate limit: Retry-After header tells us when to resume.
-                retry_after = int(response.headers.get("Retry-After", 60))
+            if response.status_code == 403 and self._is_rate_limited_response(response):
+                # Primary rate limit: wait until the reset time (or Retry-After).
+                retry_after = self._retry_after_seconds(response)
                 logger.warning(
                     "Rate limit hit (403). Waiting %d seconds (attempt %d/%d).",
                     retry_after,
@@ -425,7 +494,7 @@ query({", ".join(variable_definitions)}) {{
                 continue
 
             if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 60))
+                retry_after = self._retry_after_seconds(response)
                 logger.warning(
                     "Secondary rate limit hit (429). Waiting %d seconds (attempt %d/%d).",
                     retry_after,
@@ -439,10 +508,32 @@ query({", ".join(variable_definitions)}) {{
                 time.sleep(retry_after)
                 continue
 
+            if response.status_code in (401, 403):
+                raise RuntimeError(
+                    f"GitHub rejected the request ({response.status_code}). Check that GITHUB_TOKEN is "
+                    f"valid and has read access to the configured repositories: {response.text[:200]}"
+                )
             response.raise_for_status()
 
         # Should not be reached.
         raise RateLimitError("Exhausted retries without a successful response.")
+
+    @staticmethod
+    def _is_rate_limited_response(response: requests.Response) -> bool:
+        """Distinguish a rate-limit 403 from a permissions/auth 403."""
+        if response.headers.get("X-RateLimit-Remaining") == "0" or "Retry-After" in response.headers:
+            return True
+        return "rate limit" in response.text.lower()
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response, default: int = 60, maximum: int = 900) -> int:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            return min(int(retry_after), maximum)
+        reset_at = response.headers.get("X-RateLimit-Reset")
+        if reset_at and reset_at.isdigit():
+            return min(max(int(reset_at) - int(time.time()), 1), maximum)
+        return default
 
     def _is_rate_limit_error(self, errors: list[dict]) -> bool:
         """Return True if any GraphQL error is a rate-limit error."""

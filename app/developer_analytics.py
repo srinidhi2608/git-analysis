@@ -11,8 +11,9 @@ from typing import Any, Protocol
 
 import requests
 from sqlalchemy.orm import Session, load_only, selectinload
+from starlette.concurrency import run_in_threadpool
 
-from app.ai_analyzers import get_developer_analyzer
+from app.ai_analyzers import HEURISTIC_PROVIDER, get_developer_analyzer
 from app.config import settings
 from app.models import Commit, Developer, PullRequest, PullRequestComment
 
@@ -392,7 +393,17 @@ def _hours_between(later: datetime | None, earlier: datetime | None) -> float | 
     return (later - earlier).total_seconds() / 3600
 
 
-async def get_developer_review_analytics(db: Session, github_username: str) -> dict[str, Any] | None:
+# Maximum number of review comment bodies (and characters per body) sent to an LLM.
+AI_COMMENT_SAMPLE_LIMIT = 30
+AI_COMMENT_MAX_CHARS = 600
+
+
+def build_developer_review_analytics(db: Session, github_username: str) -> dict[str, Any] | None:
+    """Compute grounded review analytics for a developer (synchronous, DB-bound).
+
+    Returns the response payload without the AI enrichment fields, plus a private
+    ``_review_comment_samples`` list used to ground the LLM analysis.
+    """
     developer = (
         db.query(Developer)
         .options(load_only(Developer.id, Developer.github_username, Developer.team_name))
@@ -448,6 +459,7 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
     reviewer_comment_counts: Counter[str] = Counter()
     detected_languages: set[str] = set()
     pr_breakdown: list[dict[str, Any]] = []
+    review_comment_samples: list[dict[str, Any]] = []
     saved_comment_text_items = 0
 
     for pull_request in prs:
@@ -487,6 +499,16 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
             if not body:
                 continue
             saved_comment_text_items += 1
+            if len(review_comment_samples) < AI_COMMENT_SAMPLE_LIMIT:
+                review_comment_samples.append(
+                    {
+                        "pr_number": pull_request.pr_number,
+                        "pr_title": pull_request.title,
+                        "reviewer": comment.author_login,
+                        "path": comment.path,
+                        "body": body[:AI_COMMENT_MAX_CHARS],
+                    }
+                )
             for category in _categorize_comment(body):
                 comment_categories[category] += 1
                 category_prs[category].add(pull_request.pr_number)
@@ -597,18 +619,40 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
             logger.exception("Heuristic developer analytics narrator also failed for %s.", github_username)
             raise
 
-    # Run 3-tier AI analyzer to enrich the summary with strengths, improvement areas,
-    # and detailed code-quality signals.
-    pr_data_for_ai = {"metrics": metrics, "breakdown": breakdown}
-    review_comments_for_ai = [
-        {"author": item["login"], "comment_count": item["comment_count"]}
-        for item in breakdown["reviewers"]
-    ]
+    return {
+        "github_username": developer.github_username,
+        "team_name": developer.team_name,
+        "languages": sorted(detected_languages),
+        "metrics": metrics,
+        "breakdown": breakdown,
+        "sample": sample,
+        "summary": summary,
+        "_review_comment_samples": review_comment_samples,
+    }
+
+
+async def get_developer_review_analytics(db: Session, github_username: str) -> dict[str, Any] | None:
+    """Build developer analytics and enrich the summary with the 3-tier AI analyzer.
+
+    Database queries and the optional blocking HTTP narrator run in a worker
+    thread so they do not block the event loop.
+    """
+    analytics = await run_in_threadpool(build_developer_review_analytics, db, github_username)
+    if analytics is None:
+        return None
+
+    review_comment_samples = analytics.pop("_review_comment_samples")
+    summary = analytics["summary"]
+    pr_data_for_ai = {
+        "metrics": analytics["metrics"],
+        "breakdown": analytics["breakdown"],
+        "languages": analytics["languages"],
+    }
     try:
         ai_result = await get_developer_analyzer(
             developer=github_username,
             pr_data=pr_data_for_ai,
-            review_comments=review_comments_for_ai,
+            review_comments=review_comment_samples,
         )
         strengths: list[str] = []
         if ai_result.coding_standards_score >= 7:
@@ -622,16 +666,20 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
         if not strengths:
             strengths = summary.get("highlights", [])
 
-        improvement_areas: list[str] = list(ai_result.actionable_feedback)
-
+        # The overview text comes from the narrator; the AI tier that analysed the
+        # review comments is the provider shown on the dashboard.
+        summary["narrative_provider"] = summary.get("provider", "")
+        summary["provider"] = ai_result.provider
         summary["coding_standards_score"] = ai_result.coding_standards_score
         summary["design_patterns_summary"] = ai_result.design_patterns_summary
         summary["dry_vs_wet_observations"] = ai_result.dry_vs_wet_observations
         summary["reviewer_rigor_score"] = ai_result.reviewer_rigor_score
         summary["strengths"] = strengths
-        summary["improvement_areas"] = improvement_areas
+        summary["improvement_areas"] = list(ai_result.actionable_feedback)
     except Exception:
         logger.exception("AI analyzer enrichment failed for %s. Using heuristic summary only.", github_username)
+        summary["narrative_provider"] = summary.get("provider", "")
+        summary["provider"] = HEURISTIC_PROVIDER
         summary["coding_standards_score"] = None
         summary["design_patterns_summary"] = ""
         summary["dry_vs_wet_observations"] = ""
@@ -639,12 +687,4 @@ async def get_developer_review_analytics(db: Session, github_username: str) -> d
         summary["strengths"] = summary.get("highlights", [])
         summary["improvement_areas"] = summary.get("recommendations", [])
 
-    return {
-        "github_username": developer.github_username,
-        "team_name": developer.team_name,
-        "languages": sorted(detected_languages),
-        "metrics": metrics,
-        "breakdown": breakdown,
-        "sample": sample,
-        "summary": summary,
-    }
+    return analytics

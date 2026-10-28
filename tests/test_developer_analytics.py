@@ -1,20 +1,32 @@
+import asyncio
 import os
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("GITHUB_TOKEN", "test-token")
+# Point Ollama at a closed port so tests never depend on a local LLM.
+os.environ.setdefault("OLLAMA_BASE_URL", "http://127.0.0.1:9")
 
+from app.ai_analyzers import DeveloperAnalysisResult
 from app.developer_analytics import get_developer_review_analytics
 from app.models import Base, Commit, Developer, PullRequest, PullRequestComment, Repository
 
 
 class DeveloperAnalyticsTests(unittest.TestCase):
     def setUp(self):
-        self.engine = create_engine("sqlite:///:memory:")
+        # StaticPool shares one in-memory connection across threads: analytics
+        # queries run in a worker thread via run_in_threadpool.
+        self.engine = create_engine(
+            "sqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
         Base.metadata.create_all(bind=self.engine)
         self.session = sessionmaker(bind=self.engine)()
 
@@ -121,7 +133,7 @@ class DeveloperAnalyticsTests(unittest.TestCase):
         )
         self.session.commit()
 
-        analytics = get_developer_review_analytics(self.session, "alice")
+        analytics = asyncio.run(get_developer_review_analytics(self.session, "alice"))
 
         self.assertIsNotNone(analytics)
         self.assertEqual(analytics["github_username"], "alice")
@@ -131,7 +143,9 @@ class DeveloperAnalyticsTests(unittest.TestCase):
         categories = {item["category"] for item in analytics["breakdown"]["comment_categories"]}
         self.assertIn("testing", categories)
         self.assertIn("style", categories)
-        self.assertEqual(analytics["summary"]["provider"], "heuristic-fallback")
+        # Ollama is unreachable in tests, so the rule-based analyzer is the provider.
+        self.assertEqual(analytics["summary"]["provider"], "Rule-based (heuristic)")
+        self.assertEqual(analytics["summary"]["narrative_provider"], "heuristic-fallback")
         self.assertIn("Based on 2 saved PRs", analytics["summary"]["overview"])
 
     def test_handles_sparse_saved_comment_data(self):
@@ -153,13 +167,66 @@ class DeveloperAnalyticsTests(unittest.TestCase):
         )
         self.session.commit()
 
-        analytics = get_developer_review_analytics(self.session, "charlie")
+        analytics = asyncio.run(get_developer_review_analytics(self.session, "charlie"))
 
         self.assertEqual(analytics["sample"]["comment_text_items"], 0)
         self.assertEqual(analytics["summary"]["confidence"], "low")
         self.assertTrue(
             any("little or no saved review text" in item for item in analytics["summary"]["risks"])
         )
+
+    def test_ai_analyzer_receives_review_comment_text(self):
+        developer = Developer(github_username="dana", team_name=None)
+        repository = Repository(name="org/repo", is_active=True)
+        self.session.add_all([developer, repository])
+        self.session.flush()
+        created_at = datetime(2026, 2, 1, 9, 0, 0)
+        pull_request = PullRequest(
+            repo_id=repository.id,
+            developer_id=developer.id,
+            pr_number=7,
+            title="Add caching layer",
+            created_at=created_at,
+            merged_at=created_at + timedelta(hours=4),
+            cycle_time_minutes=240,
+            review_comments_count=1,
+            commit_count=1,
+        )
+        self.session.add(pull_request)
+        self.session.flush()
+        self.session.add(
+            PullRequestComment(
+                pr_id=pull_request.id,
+                external_id="c-1",
+                comment_type="review_comment",
+                author_login="erin",
+                body="This duplicates the logic in cache.py; extract a helper.",
+                path="app/cache.py",
+                created_at=created_at + timedelta(hours=1),
+            )
+        )
+        self.session.commit()
+
+        fake_result = DeveloperAnalysisResult(
+            coding_standards_score=8,
+            design_patterns_summary="Uses a cache-aside pattern.",
+            dry_vs_wet_observations="One duplicated block flagged.",
+            reviewer_rigor_score=6,
+            actionable_feedback=["Extract the shared cache helper."],
+        )
+        with patch(
+            "app.developer_analytics.get_developer_analyzer",
+            new=AsyncMock(return_value=fake_result),
+        ) as analyzer:
+            analytics = asyncio.run(get_developer_review_analytics(self.session, "dana"))
+
+        review_comments = analyzer.await_args.kwargs["review_comments"]
+        self.assertEqual(len(review_comments), 1)
+        self.assertEqual(review_comments[0]["body"], "This duplicates the logic in cache.py; extract a helper.")
+        self.assertEqual(review_comments[0]["path"], "app/cache.py")
+        self.assertNotIn("_review_comment_samples", analytics)
+        self.assertEqual(analytics["summary"]["design_patterns_summary"], "Uses a cache-aside pattern.")
+        self.assertEqual(analytics["summary"]["improvement_areas"], ["Extract the shared cache helper."])
 
 
 if __name__ == "__main__":

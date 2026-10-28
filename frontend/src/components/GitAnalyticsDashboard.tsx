@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -50,6 +50,47 @@ interface DeveloperItem {
   team_name: string | null;
 }
 
+interface TeamItem {
+  name: string;
+  members: string[];
+}
+
+interface TeamsResponse {
+  enabled: boolean;
+  teams: TeamItem[];
+}
+
+interface SnapshotItem {
+  name: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+interface SnapshotListResponse {
+  directory: string;
+  autoload: boolean;
+  save_after_sync: boolean;
+  snapshots: SnapshotItem[];
+}
+
+interface IngestRunStats {
+  lookback_days?: number;
+  upserted?: number;
+  unchanged?: number;
+  github_requests?: number;
+  skipped_authors?: number;
+  full_refresh?: boolean;
+  snapshot?: string;
+  error?: string;
+  finished_at?: string;
+}
+
+interface IngestStatus {
+  status: string;
+  message: string;
+  last_run: IngestRunStats | null;
+}
+
 interface TeamPerformance {
   team_name: string;
   average_pr_cycle_time_minutes: number | null;
@@ -71,6 +112,8 @@ interface DoraSummary {
   change_failure_proxy_rate: number;
   average_recovery_time_hours: number | null;
   recovery_samples: number;
+  ghost_merge_count: number;
+  ghost_merge_rate: number;
 }
 
 interface DoraWeeklyTrendItem {
@@ -79,6 +122,7 @@ interface DoraWeeklyTrendItem {
   average_lead_time_hours: number | null;
   average_time_to_first_review_hours: number | null;
   change_failure_proxy_rate: number;
+  ghost_merges: number;
 }
 
 interface TeamDoraMetricsResponse {
@@ -112,6 +156,7 @@ interface DeveloperAnalyticsCategorySummary {
 
 interface DeveloperAnalyticsSummary {
   provider: string;
+  narrative_provider?: string;
   confidence: string;
   overview: string;
   categories: DeveloperAnalyticsCategorySummary[];
@@ -241,8 +286,8 @@ function DoraMetricsPanel({
 }) {
   if (loading) {
     return (
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 text-sm text-slate-400 shadow-xl shadow-black/20">
-        Loading DORA-inspired metrics…
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl shadow-black/20">
+        <Spinner label="Loading DORA-inspired metrics…" />
       </div>
     );
   }
@@ -310,6 +355,12 @@ function DoraMetricsPanel({
           : `${metrics.recovery_samples} recovery samples`,
       trendDirection: metrics.change_failure_proxy_rate <= 35 ? "up" : "down",
     },
+    {
+      label: "Ghost Merges",
+      value: `${metrics.ghost_merge_count}`,
+      trendValue: `${metrics.ghost_merge_rate.toFixed(1)}% merged unreviewed`,
+      trendDirection: metrics.ghost_merge_count === 0 ? "up" : "down",
+    },
   ];
 
   return (
@@ -325,7 +376,7 @@ function DoraMetricsPanel({
         </span>
       </div>
 
-      <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {cards.map((card) => (
           <AdvancedMetricCard
             key={card.label}
@@ -414,6 +465,7 @@ function DoraMetricsPanel({
 }
 
 function IndividualPerformancePanel({
+  developerName,
   analytics,
   loading,
   error,
@@ -423,6 +475,7 @@ function IndividualPerformancePanel({
   doraError,
   thresholds,
 }: {
+  developerName: string;
   analytics: DeveloperAnalyticsResponse | null;
   loading: boolean;
   error: string;
@@ -437,10 +490,12 @@ function IndividualPerformancePanel({
   const isLoading = loading || doraLoading;
   const hasError = error || doraError;
 
-  if (isLoading && !analytics && !doraMetrics) {
+  // Data is cleared when the selection changes, so while loading nothing from the
+  // previously selected developer can be on screen.
+  if (isLoading) {
     return (
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 text-sm text-slate-400 shadow-xl shadow-black/20">
-        Loading individual performance data…
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl shadow-black/20">
+        <Spinner label={developerName ? `Analyzing ${developerName}…` : "Loading individual performance data…"} />
       </div>
     );
   }
@@ -478,7 +533,7 @@ function IndividualPerformancePanel({
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">Individual Performance</p>
-            <h2 className="mt-2 text-2xl font-semibold text-white">{analytics?.github_username ?? "Developer"}</h2>
+            <h2 className="mt-2 text-2xl font-semibold text-white">{analytics?.github_username || developerName || "Developer"}</h2>
             {analytics && (
               <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">{analytics.summary.overview}</p>
             )}
@@ -492,7 +547,14 @@ function IndividualPerformancePanel({
                 <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
                   Confidence: {analytics.summary.confidence}
                 </span>
-                <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5">
+                <span
+                  className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5"
+                  title={
+                    analytics.summary.narrative_provider
+                      ? `AI analysis: ${analytics.summary.provider}; overview text: ${analytics.summary.narrative_provider}`
+                      : undefined
+                  }
+                >
                   Provider: {analytics.summary.provider}
                 </span>
               </div>
@@ -618,7 +680,7 @@ function IndividualPerformancePanel({
             )}
             {doraMetrics && doraMetrics.pull_request_count > 0 && (
               <>
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                   {[
                     {
                       label: "Merge Frequency",
@@ -657,6 +719,12 @@ function IndividualPerformancePanel({
                         ? `Recovery ${doraMetrics.average_recovery_time_hours.toFixed(1)}h`
                         : `${doraMetrics.recovery_samples} samples`,
                       trendDirection: (doraMetrics.change_failure_proxy_rate <= thresholds.change_failure_acceptable_pct ? "up" : "down") as TrendDirection,
+                    },
+                    {
+                      label: "Ghost Merges",
+                      value: `${doraMetrics.ghost_merge_count}`,
+                      trendValue: `${doraMetrics.ghost_merge_rate.toFixed(1)}% merged unreviewed`,
+                      trendDirection: (doraMetrics.ghost_merge_count === 0 ? "up" : "down") as TrendDirection,
                     },
                   ].map((card) => (
                     <AdvancedMetricCard key={card.label} {...card} />
@@ -857,16 +925,42 @@ function IndividualPerformancePanel({
 }
 
 
-async function apiFetch<T>(path: string): Promise<T> {
-  const res = await fetch(path);
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
+async function apiFetch<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, { signal });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
+}
+
+function Spinner({ label }: { label?: string }) {
+  return (
+    <span role="status" aria-label={label ?? "Loading"} className="inline-flex items-center gap-2 text-slate-400">
+      <svg aria-hidden="true" className="h-5 w-5 animate-spin" fill="none" viewBox="0 0 24 24">
+        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+        <path className="opacity-75" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" fill="currentColor" />
+      </svg>
+      {label && <span className="text-sm">{label}</span>}
+    </span>
+  );
 }
 
 export default function GitAnalyticsDashboard() {
   const [activeTab, setActiveTab] = useState<TabKey>("team");
   const [selectedDeveloper, setSelectedDeveloper] = useState<string>("");
+  // Developer whose individual data is loaded (or loading); null forces a reload.
+  const [loadedDeveloper, setLoadedDeveloper] = useState<string | null>(null);
+  // "" = all configured teams
+  const [selectedTeam, setSelectedTeam] = useState<string>("");
+  const [teams, setTeams] = useState<TeamItem[]>([]);
   const [lookbackDays, setLookbackDays] = useState<number>(7);
+  // Lookback applied to the dashboard; follows `lookbackDays` after typing pauses.
+  const [windowDays, setWindowDays] = useState<number>(7);
+  const [fullRefresh, setFullRefresh] = useState(false);
+  const [snapshotInfo, setSnapshotInfo] = useState<SnapshotListResponse | null>(null);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
 
   const [teamPerf, setTeamPerf] = useState<TeamPerformance[]>([]);
   const [developers, setDevelopers] = useState<DeveloperItem[]>([]);
@@ -890,98 +984,212 @@ export default function GitAnalyticsDashboard() {
   });
 
   const [loading, setLoading] = useState(false);
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [indivLoading, setIndivLoading] = useState(false);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
-  const [doraLoading, setDoraLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
   const [error, setError] = useState("");
   const [analyticsError, setAnalyticsError] = useState("");
-  const [doraError, setDoraError] = useState("");
+  const [teamDoraError, setTeamDoraError] = useState("");
+  const [indivDoraError, setIndivDoraError] = useState("");
 
-  const loadTeamData = useCallback(async () => {
-    setDoraLoading(true);
-    setDoraError("");
+  // In-flight requests; starting a new load aborts the previous one so slow
+  // responses (e.g. the LLM-backed analytics) never overwrite newer selections.
+  const teamAbortRef = useRef<AbortController | null>(null);
+  const quickAbortRef = useRef<AbortController | null>(null);
+  const analyticsAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      teamAbortRef.current?.abort();
+      quickAbortRef.current?.abort();
+      analyticsAbortRef.current?.abort();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const days = Math.min(Math.max(Math.round(lookbackDays) || 7, 1), 365);
+    const timer = setTimeout(() => setWindowDays(days), 500);
+    return () => clearTimeout(timer);
+  }, [lookbackDays]);
+
+  const loadSnapshots = useCallback(async () => {
     try {
-      const [perf, cycle, prsWeek, devs, dora, thresh] = await Promise.all([
-        apiFetch<TeamPerformance[]>("/api/team-performance"),
-        apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
-        apiFetch<PrsPerWeekItem[]>("/api/chart/prs-per-week"),
-        apiFetch<DeveloperItem[]>("/api/developers"),
-        apiFetch<TeamDoraMetricsResponse>("/api/dora/team"),
-        apiFetch<Thresholds>("/api/config/thresholds"),
+      setSnapshotInfo(await apiFetch<SnapshotListResponse>("/api/snapshots"));
+    } catch {
+      setSnapshotInfo(null);
+    }
+  }, []);
+
+  /** Loads team-level data and returns the developer that should be selected. */
+  const loadTeamData = useCallback(async (): Promise<string> => {
+    teamAbortRef.current?.abort();
+    const controller = new AbortController();
+    teamAbortRef.current = controller;
+    const { signal } = controller;
+
+    setTeamLoading(true);
+    setTeamDoraError("");
+    try {
+      const params = new URLSearchParams({ days: String(windowDays) });
+      if (selectedTeam) params.set("team", selectedTeam);
+      const teamQuery = `?${params}`;
+      const [perf, cycle, prsWeek, devs, dora, thresh, teamList] = await Promise.all([
+        apiFetch<TeamPerformance[]>(`/api/team-performance${teamQuery}`, signal),
+        apiFetch<PrCycleItem[]>(`/api/chart/pr-cycle-by-developer${teamQuery}`, signal),
+        apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week${teamQuery}`, signal),
+        apiFetch<DeveloperItem[]>(`/api/developers${teamQuery}`, signal),
+        apiFetch<TeamDoraMetricsResponse>(`/api/dora/team${teamQuery}`, signal),
+        apiFetch<Thresholds>("/api/config/thresholds", signal),
+        apiFetch<TeamsResponse>("/api/teams", signal),
       ]);
+      setTeams(teamList.teams);
       setTeamPerf(perf);
       setCycleByDev(cycle);
       setTeamPrsPerWeek(prsWeek);
       setDevelopers(devs);
       setTeamDoraMetrics(dora);
       setThresholds(thresh);
-      if (!selectedDeveloper && devs.length > 0) {
-        setSelectedDeveloper(devs[0].github_username);
+      // Keep the selected developer only if they belong to the selected team.
+      if (devs.some((d) => d.github_username === selectedDeveloper)) return selectedDeveloper;
+      const nextDeveloper = devs[0]?.github_username ?? "";
+      setSelectedDeveloper(nextDeveloper);
+      return nextDeveloper;
+    } catch (err) {
+      if (!isAbortError(err)) {
+        setTeamDoraMetrics(null);
+        setTeamDoraError("Failed to load DORA-inspired GitHub delivery metrics.");
       }
-    } catch {
-      setTeamDoraMetrics(null);
-      setDoraError("Failed to load DORA-inspired GitHub delivery metrics.");
-      throw new Error("team dora metrics failed");
+      throw err;
     } finally {
-      setDoraLoading(false);
+      if (teamAbortRef.current === controller) setTeamLoading(false);
     }
-  }, [selectedDeveloper]);
+  }, [selectedDeveloper, selectedTeam, windowDays]);
 
-  const loadIndividualData = useCallback(async (dev: string) => {
-    if (!dev) {
-      setDeveloperAnalytics(null);
+  /** Charts and DORA: quick database queries that depend on the lookback window. */
+  const loadIndividualQuick = useCallback(
+    async (dev: string) => {
+      quickAbortRef.current?.abort();
+      const controller = new AbortController();
+      quickAbortRef.current = controller;
+      const { signal } = controller;
+      const isCurrent = () => quickAbortRef.current === controller;
+
       setDeveloperDoraMetrics(null);
+      setIndivPrsPerWeek([]);
+      setIndivCycleTime([]);
+      setIndivDoraError("");
+      if (!dev) {
+        setIndivLoading(false);
+        return;
+      }
+      setIndivLoading(true);
+      const encoded = encodeURIComponent(dev);
+      try {
+        const [prsWeek, cycleTime, dora] = await Promise.all([
+          apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week?developer=${encoded}&days=${windowDays}`, signal),
+          apiFetch<PrCycleItem[]>(`/api/chart/pr-cycle-by-developer?days=${windowDays}`, signal),
+          apiFetch<DeveloperDoraMetricsResponse>(`/api/developers/${encoded}/dora?days=${windowDays}`, signal),
+        ]);
+        if (!isCurrent()) return;
+        setIndivPrsPerWeek(prsWeek);
+        setIndivCycleTime(cycleTime.filter((r) => r.developer === dev));
+        setDeveloperDoraMetrics(dora);
+      } catch (err) {
+        if (isAbortError(err) || !isCurrent()) return;
+        setIndivDoraError("Failed to load DORA-inspired GitHub delivery metrics.");
+      } finally {
+        if (isCurrent()) setIndivLoading(false);
+      }
+    },
+    [windowDays],
+  );
+
+  /** AI review analytics (may call an LLM); independent of the lookback window. */
+  const loadIndividualAnalytics = useCallback(async (dev: string) => {
+    analyticsAbortRef.current?.abort();
+    const controller = new AbortController();
+    analyticsAbortRef.current = controller;
+    const { signal } = controller;
+    const isCurrent = () => analyticsAbortRef.current === controller;
+
+    setDeveloperAnalytics(null);
+    setAnalyticsError("");
+    if (!dev) {
+      setAnalyticsLoading(false);
       return;
     }
-
     setAnalyticsLoading(true);
-    setDoraLoading(true);
-    setAnalyticsError("");
-    setDoraError("");
     try {
-      const [prsWeek, cycleTime, analytics, dora] = await Promise.all([
-        apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week?developer=${encodeURIComponent(dev)}`),
-        apiFetch<PrCycleItem[]>("/api/chart/pr-cycle-by-developer"),
-        apiFetch<DeveloperAnalyticsResponse>(`/api/developers/${encodeURIComponent(dev)}/analytics`),
-        apiFetch<DeveloperDoraMetricsResponse>(`/api/developers/${encodeURIComponent(dev)}/dora`),
-      ]);
-      setIndivPrsPerWeek(prsWeek);
-      setIndivCycleTime(cycleTime.filter((r) => r.developer === dev));
-      setDeveloperAnalytics(analytics);
-      setDeveloperDoraMetrics(dora);
-    } catch {
-      setDeveloperAnalytics(null);
-      setDeveloperDoraMetrics(null);
+      const result = await apiFetch<DeveloperAnalyticsResponse>(
+        `/api/developers/${encodeURIComponent(dev)}/analytics`,
+        signal,
+      );
+      if (isCurrent()) setDeveloperAnalytics(result);
+    } catch (err) {
+      if (isAbortError(err) || !isCurrent()) return;
       setAnalyticsError("Failed to load AI developer review analytics.");
-      setDoraError("Failed to load DORA-inspired GitHub delivery metrics.");
     } finally {
-      setAnalyticsLoading(false);
-      setDoraLoading(false);
+      if (isCurrent()) setAnalyticsLoading(false);
     }
   }, []);
 
-  const refreshData = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      await loadTeamData();
-      if (selectedDeveloper) await loadIndividualData(selectedDeveloper);
-    } catch {
-      setError("Failed to load data. Make sure the backend is running.");
-    } finally {
-      setLoading(false);
-    }
-  }, [loadTeamData, loadIndividualData, selectedDeveloper]);
+  /** Loads everything for ``dev``; a new call cancels the previous developer's requests. */
+  const loadIndividualData = useCallback(
+    async (dev: string) => {
+      // Recorded first so nothing from the previous developer is shown under the new name.
+      setLoadedDeveloper(dev);
+      await Promise.all([loadIndividualQuick(dev), loadIndividualAnalytics(dev)]);
+    },
+    [loadIndividualQuick, loadIndividualAnalytics],
+  );
 
+  /**
+   * Reloads team data and, on the Individual tab, the selected developer's data.
+   * ``includeAnalytics`` re-runs the LLM-backed analytics too (Refresh / Sync);
+   * lookback and team changes only reload the window-dependent queries.
+   */
+  const refreshData = useCallback(
+    async (includeAnalytics = true) => {
+      setLoading(true);
+      setError("");
+      try {
+        const dev = await loadTeamData();
+        if (activeTab !== "individual") {
+          // Reload individual data next time the Individual tab is opened.
+          setLoadedDeveloper(null);
+        } else if (dev === selectedDeveloper) {
+          // (A changed selection is loaded by the selection effect below.)
+          await (includeAnalytics ? loadIndividualData(dev) : loadIndividualQuick(dev));
+        }
+      } catch (err) {
+        if (!isAbortError(err)) setError("Failed to load data. Make sure the backend is running.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [activeTab, loadTeamData, loadIndividualData, loadIndividualQuick, selectedDeveloper],
+  );
+
+  // Initial load, and reload whenever the selected team or lookback window changes.
   useEffect(() => {
-    refreshData();
+    refreshData(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectedTeam, windowDays]);
 
   useEffect(() => {
-    if (selectedDeveloper) loadIndividualData(selectedDeveloper);
-  }, [selectedDeveloper, loadIndividualData]);
+    loadSnapshots();
+  }, [loadSnapshots]);
+
+  // Load individual data (including the LLM-backed analytics) only while the
+  // Individual tab is open, and only when the selection changed.
+  useEffect(() => {
+    if (activeTab === "individual" && selectedDeveloper && loadedDeveloper !== selectedDeveloper) {
+      loadIndividualData(selectedDeveloper);
+    }
+  }, [activeTab, selectedDeveloper, loadedDeveloper, loadIndividualData]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -991,11 +1199,34 @@ export default function GitAnalyticsDashboard() {
       const res = await fetch("/api/ingest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lookback_days: Number(lookbackDays) || 7 }),
+        body: JSON.stringify({ lookback_days: Number(lookbackDays) || 7, full_refresh: fullRefresh }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        setError(data.detail ?? `Sync failed (${res.status}).`);
+        return;
+      }
       setSyncMessage(data.message ?? "Ingestion triggered.");
-      setTimeout(() => refreshData(), 3000);
+      // Poll until the background ingestion finishes, then reload the dashboard.
+      let status: IngestStatus;
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        status = await apiFetch<IngestStatus>("/api/ingest/status");
+        if (status.status !== "running") break;
+      }
+      const run = status.last_run;
+      if (run?.error) {
+        setError(`Sync failed: ${run.error}`);
+      } else {
+        setSyncMessage(
+          run
+            ? `Sync complete: ${run.upserted ?? 0} PR(s) updated, ${run.unchanged ?? 0} unchanged (not downloaded again), ` +
+                `${run.github_requests ?? 0} GitHub API request(s)` +
+                (run.snapshot ? `. Snapshot saved: ${run.snapshot}.` : ".")
+            : "Sync complete.",
+        );
+      }
+      await Promise.all([refreshData(), loadSnapshots()]);
     } catch {
       setError("Sync failed. Check backend logs.");
     } finally {
@@ -1003,32 +1234,97 @@ export default function GitAnalyticsDashboard() {
     }
   };
 
+  const handleSaveSnapshot = async () => {
+    setSnapshotBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/snapshots", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.detail ?? `Saving the snapshot failed (${res.status}).`);
+        return;
+      }
+      setSyncMessage(`Snapshot saved: ${data.name} (${data.counts.pull_requests} PRs).`);
+      await loadSnapshots();
+    } catch {
+      setError("Saving the snapshot failed. Check backend logs.");
+    } finally {
+      setSnapshotBusy(false);
+    }
+  };
+
+  const handleLoadSnapshot = async () => {
+    setSnapshotBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/snapshots/load", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.detail ?? `Loading the snapshot failed (${res.status}).`);
+        return;
+      }
+      setSyncMessage(`Snapshot loaded: ${data.name} (${data.counts.pull_requests} PRs).`);
+      await refreshData();
+    } catch {
+      setError("Loading the snapshot failed. Check backend logs.");
+    } finally {
+      setSnapshotBusy(false);
+    }
+  };
+
+  const latestSnapshot = snapshotInfo?.snapshots[0] ?? null;
+
   const isTeamView = activeTab === "team";
 
-  const totalPrs = teamPerf.reduce((s, t) => s + t.total_prs, 0);
   const avgCycleMin =
     teamPerf.length > 0
       ? teamPerf.reduce((s, t) => s + (t.average_pr_cycle_time_minutes ?? 0), 0) / teamPerf.length
       : null;
 
+  // Individual data belongs to another developer until the new load starts.
+  const indivStale = loadedDeveloper !== selectedDeveloper;
+  const indivDataLoading = indivLoading || indivStale;
+  const indivAnalyticsLoading = analyticsLoading || indivStale;
+
   const teamCards = [
-    { label: "Active Developers", value: developers.length.toString() },
-    { label: "Avg PR Cycle Time", value: avgCycleMin != null ? `${(avgCycleMin / 60).toFixed(1)}h` : "—" },
-    { label: "PRs Merged (30d)", value: totalPrs.toString() },
+    { label: "Active Developers", value: developers.length.toString(), loading: teamLoading },
+    {
+      label: "Avg PR Cycle Time",
+      value: avgCycleMin != null ? `${(avgCycleMin / 60).toFixed(1)}h` : "—",
+      loading: teamLoading,
+    },
+    {
+      label: `PRs Merged (${windowDays}d)`,
+      value: (teamDoraMetrics?.summary.merged_pull_request_count ?? 0).toString(),
+      loading: teamLoading,
+    },
   ];
 
   const selectedDevPerf = developerAnalytics?.metrics.average_cycle_time_hours != null
     ? developerAnalytics.metrics.average_cycle_time_hours
     : cycleByDev.find((r) => r.developer === selectedDeveloper)?.cycleTimeHours;
   const individualCards = [
-    { label: "Developer", value: selectedDeveloper || "—" },
-    { label: "Avg PR Cycle Time", value: selectedDevPerf != null ? `${selectedDevPerf.toFixed(1)}h` : "—" },
-    { label: "PRs Analyzed", value: developerAnalytics?.metrics.pull_request_count?.toString() ?? "0" },
+    { label: "Developer", value: selectedDeveloper || "—", loading: false },
+    {
+      label: "Avg PR Cycle Time",
+      value: selectedDevPerf != null ? `${selectedDevPerf.toFixed(1)}h` : "—",
+      loading: indivAnalyticsLoading,
+    },
+    {
+      label: "PRs Analyzed",
+      value: developerAnalytics?.metrics.pull_request_count?.toString() ?? "0",
+      loading: indivAnalyticsLoading,
+    },
   ];
 
   const overviewCards = isTeamView ? teamCards : individualCards;
   const prData = isTeamView ? teamPrsPerWeek : indivPrsPerWeek;
   const cycleData = isTeamView ? cycleByDev : indivCycleTime;
+  const chartsLoading = isTeamView ? teamLoading : indivDataLoading;
 
   return (
     <div className="min-h-screen bg-slate-950 p-6 text-slate-100 md:p-8">
@@ -1040,7 +1336,10 @@ export default function GitAnalyticsDashboard() {
               <p className="mt-1 text-sm text-slate-400">Track pull request throughput and cycle time trends.</p>
             </div>
             <div className="flex flex-col items-end gap-3 sm:flex-row sm:items-center">
-              <label className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200">
+              <label
+                className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+                title="Days of PR activity shown on the dashboard and fetched by Sync"
+              >
                 <span>Lookback</span>
                 <input
                   aria-label="Lookback days"
@@ -1064,7 +1363,7 @@ export default function GitAnalyticsDashboard() {
               <button
                 className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-600 disabled:opacity-50"
                 disabled={loading}
-                onClick={refreshData}
+                onClick={() => refreshData()}
                 type="button"
               >
                 {loading ? "Loading…" : "↺ Refresh"}
@@ -1092,29 +1391,88 @@ export default function GitAnalyticsDashboard() {
             </div>
           </div>
 
+          <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-slate-800 pt-4 text-sm text-slate-400">
+            <label className="flex items-center gap-2" title="Re-download every PR in the lookback window, even unchanged ones">
+              <input
+                checked={fullRefresh}
+                className="h-4 w-4 accent-emerald-500"
+                onChange={(e) => setFullRefresh(e.target.checked)}
+                type="checkbox"
+              />
+              Full refresh on sync
+            </label>
+            <span className="hidden text-slate-700 sm:inline">|</span>
+            <span>
+              {latestSnapshot
+                ? `Last snapshot: ${new Date(latestSnapshot.created_at).toLocaleString()}`
+                : "No snapshot saved yet"}
+              {snapshotInfo?.save_after_sync ? " (saved automatically after each sync)" : ""}
+            </span>
+            <button
+              className="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+              disabled={snapshotBusy || syncing}
+              onClick={handleSaveSnapshot}
+              type="button"
+            >
+              Save snapshot
+            </button>
+            <button
+              className="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+              disabled={snapshotBusy || syncing || !latestSnapshot}
+              onClick={handleLoadSnapshot}
+              type="button"
+            >
+              Load latest snapshot
+            </button>
+          </div>
+
           {syncMessage && (
             <p className="mt-3 rounded-lg bg-emerald-900/40 px-4 py-2 text-sm text-emerald-300">{syncMessage}</p>
           )}
           {error && <p className="mt-3 rounded-lg bg-red-900/40 px-4 py-2 text-sm text-red-300">{error}</p>}
         </div>
 
-        {!isTeamView && developers.length > 0 && (
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-slate-400" htmlFor="dev-select">
-              Developer:
-            </label>
-            <select
-              id="dev-select"
-              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:outline-none"
-              onChange={(e) => setSelectedDeveloper(e.target.value)}
-              value={selectedDeveloper}
-            >
-              {developers.map((d) => (
-                <option key={d.github_username} value={d.github_username}>
-                  {d.github_username}
-                </option>
-              ))}
-            </select>
+        {(teams.length > 0 || (!isTeamView && developers.length > 0)) && (
+          <div className="flex flex-wrap items-center gap-3">
+            {teams.length > 0 && (
+              <>
+                <label className="text-sm text-slate-400" htmlFor="team-select">
+                  Team:
+                </label>
+                <select
+                  id="team-select"
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:outline-none"
+                  onChange={(e) => setSelectedTeam(e.target.value)}
+                  value={selectedTeam}
+                >
+                  <option value="">All teams</option>
+                  {teams.map((t) => (
+                    <option key={t.name} value={t.name}>
+                      {t.name} ({t.members.length})
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            {!isTeamView && developers.length > 0 && (
+              <>
+                <label className="text-sm text-slate-400" htmlFor="dev-select">
+                  Developer:
+                </label>
+                <select
+                  id="dev-select"
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:outline-none"
+                  onChange={(e) => setSelectedDeveloper(e.target.value)}
+                  value={selectedDeveloper}
+                >
+                  {developers.map((d) => (
+                    <option key={d.github_username} value={d.github_username}>
+                      {d.github_username}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
           </div>
         )}
 
@@ -1122,19 +1480,21 @@ export default function GitAnalyticsDashboard() {
           {overviewCards.map((card) => (
             <div key={card.label} className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-lg shadow-black/10">
               <p className="text-xs uppercase tracking-wide text-slate-400">{card.label}</p>
-              <p className="mt-2 text-2xl font-semibold text-slate-50">{card.value}</p>
+              <div className="mt-2 flex h-8 items-center text-2xl font-semibold text-slate-50">
+                {card.loading ? <Spinner /> : card.value}
+              </div>
             </div>
           ))}
         </div>
 
         {isTeamView ? (
           <DoraMetricsPanel
-            title="Team Delivery Performance"
+            title={selectedTeam ? `${selectedTeam} Delivery Performance` : "Team Delivery Performance"}
             subtitle="GitHub-native proxies for DORA delivery, lead time, quality, and review flow."
             metrics={teamDoraMetrics?.summary ?? null}
             weeklyTrends={teamDoraMetrics?.weekly_trends ?? []}
-            loading={doraLoading}
-            error={doraError}
+            loading={teamLoading}
+            error={teamDoraError}
           />
         ) : null}
 
@@ -1144,7 +1504,11 @@ export default function GitAnalyticsDashboard() {
               {isTeamView ? "Average PR Cycle Time by Developer" : "Average PR Cycle Time (selected developer)"}
             </h2>
             <div className="h-80 w-full">
-              {cycleData.length === 0 ? (
+              {chartsLoading ? (
+                <div className="flex h-full items-center justify-center">
+                  <Spinner label="Loading…" />
+                </div>
+              ) : cycleData.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-sm text-slate-500">
                   No data — click <span className="mx-1 font-medium text-emerald-400">Sync from GitHub</span> to ingest data.
                 </div>
@@ -1166,7 +1530,11 @@ export default function GitAnalyticsDashboard() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/10">
             <h2 className="mb-4 text-sm font-medium text-slate-300">Total PRs Merged per Week</h2>
             <div className="h-80 w-full">
-              {prData.length === 0 ? (
+              {chartsLoading ? (
+                <div className="flex h-full items-center justify-center">
+                  <Spinner label="Loading…" />
+                </div>
+              ) : prData.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-sm text-slate-500">
                   No data — click <span className="mx-1 font-medium text-emerald-400">Sync from GitHub</span> to ingest data.
                 </div>
@@ -1195,13 +1563,14 @@ export default function GitAnalyticsDashboard() {
 
         {!isTeamView && (
           <IndividualPerformancePanel
+            developerName={selectedDeveloper}
             analytics={developerAnalytics}
             error={analyticsError}
-            loading={analyticsLoading}
+            loading={indivAnalyticsLoading}
             doraMetrics={developerDoraMetrics?.summary ?? null}
             doraWeeklyTrends={developerDoraMetrics?.weekly_trends ?? []}
-            doraLoading={doraLoading}
-            doraError={doraError}
+            doraLoading={indivDataLoading}
+            doraError={indivDoraError}
             thresholds={thresholds}
           />
         )}
