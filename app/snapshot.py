@@ -23,12 +23,24 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import Commit, Developer, PullRequest, PullRequestComment, Repository
+from app.devops_ingest import RUN_DATE_FIELDS, RUN_FIELDS, WORK_ITEM_DATE_FIELDS, WORK_ITEM_FIELDS, upsert_pipeline_run, upsert_work_item
+from app.models import (
+    AzurePipelineRun,
+    AzureWorkItem,
+    Commit,
+    Developer,
+    PullRequest,
+    PullRequestComment,
+    Repository,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-SNAPSHOT_FORMAT_VERSION = 1
+# Version 2 adds Azure DevOps work items and pipeline runs; version 1 still loads.
+SNAPSHOT_FORMAT_VERSION = 2
+SUPPORTED_FORMAT_VERSIONS = (1, 2)
+TABLES = ("repositories", "developers", "pull_requests", "commits", "comments", "azure_work_items", "azure_pipeline_runs")
 SNAPSHOT_PATTERN = "snapshot-*.json.gz"
 _SAFE_NAME = re.compile(r"^snapshot-[0-9TZ-]+\.json\.gz$")
 
@@ -51,6 +63,7 @@ PULL_REQUEST_FIELDS = (
     "first_review_comment_at",
     "last_review_comment_at",
     "github_updated_at",
+    "merge_commit_sha",
 )
 COMMENT_FIELDS = ("comment_type", "author_login", "body", "path", "review_state", "created_at")
 DATETIME_FIELDS = {
@@ -60,6 +73,8 @@ DATETIME_FIELDS = {
     "last_review_comment_at",
     "github_updated_at",
     "committed_at",
+    *WORK_ITEM_DATE_FIELDS,
+    *RUN_DATE_FIELDS,
 }
 
 
@@ -142,6 +157,24 @@ def export_data(db: Session) -> dict[str, Any]:
             }
             for comment in db.query(PullRequestComment).all()
         ],
+        "azure_work_items": [
+            {
+                "id": item.id,
+                **{field: getattr(item, field) for field in WORK_ITEM_FIELDS},
+                **{field: _dump_value(getattr(item, field)) for field in WORK_ITEM_DATE_FIELDS},
+                "tags": [tag.tag for tag in item.tags],
+            }
+            for item in db.query(AzureWorkItem).all()
+        ],
+        "azure_pipeline_runs": [
+            {
+                "project": run.project,
+                "build_id": run.build_id,
+                **{field: getattr(run, field) for field in RUN_FIELDS},
+                **{field: _dump_value(getattr(run, field)) for field in RUN_DATE_FIELDS},
+            }
+            for run in db.query(AzurePipelineRun).all()
+        ],
     }
 
 
@@ -160,14 +193,14 @@ def save_snapshot(db: Session, directory: str | Path, keep: int = 5) -> dict[str
     for old in list_snapshots(path)[keep:]:
         (path / old["name"]).unlink(missing_ok=True)
 
-    counts = {table: len(data[table]) for table in ("repositories", "developers", "pull_requests", "commits", "comments")}
+    counts = {table: len(data[table]) for table in TABLES}
     logger.info("Saved snapshot %s (%s).", target, ", ".join(f"{v} {k}" for k, v in counts.items()))
     return {"name": name, "counts": counts}
 
 
 def import_data(db: Session, data: dict[str, Any]) -> dict[str, int]:
     """Upsert snapshot ``data`` into the database by natural keys."""
-    if data.get("format_version") != SNAPSHOT_FORMAT_VERSION:
+    if data.get("format_version") not in SUPPORTED_FORMAT_VERSIONS:
         raise ValueError(f"Unsupported snapshot format version: {data.get('format_version')}")
 
     repositories = {repo.name: repo for repo in db.query(Repository).all()}
@@ -228,8 +261,13 @@ def import_data(db: Session, data: dict[str, Any]) -> dict[str, int]:
             setattr(comment, field, _load_value(field, row.get(field)))
         comment.body = comment.body or ""
 
+    for row in data.get("azure_work_items", []):
+        upsert_work_item(db, {**row, **{field: _load_value(field, row.get(field)) for field in WORK_ITEM_DATE_FIELDS}})
+    for row in data.get("azure_pipeline_runs", []):
+        upsert_pipeline_run(db, {**row, **{field: _load_value(field, row.get(field)) for field in RUN_DATE_FIELDS}})
+
     db.commit()
-    return {table: len(data.get(table, [])) for table in ("repositories", "developers", "pull_requests", "commits", "comments")}
+    return {table: len(data.get(table, [])) for table in TABLES}
 
 
 def load_snapshot(db: Session, path: str | Path) -> dict[str, int]:

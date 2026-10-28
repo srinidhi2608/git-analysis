@@ -14,3 +14,18 @@ repositories:
 #     - name: "CF-SinchanaBhat"
 #   IppPayFac:
 #     - name: "CF-NewMember"
+
+# Optional: DevOps Integration page (Azure Boards + Azure Pipelines).
+# The access token goes in .env as AZURE_DEVOPS_PAT. See README "DevOps Integration".
+# Team members (above) can add `azure: <their Azure DevOps email>` and
+# `role: developer | tester` to link their Azure work items to their GitHub login.
+#
+# azure_devops:
+#   organization: "your-org"              # or "https://dev.azure.com/your-org"
+#   projects: ["YourProject"]
+#   work_item_types: ["User Story", "Bug", "Task"]
+#   deployment_pattern: "(?i)deploy|release"   # pipeline names that are deployments
+#   production_pattern: "(?i)prod"             # ...and go to production (empty = all)
+#   incidents:                                 # optional: work items that are incidents
+#     work_item_types: ["Bug"]
+#     tags: ["Incident"]

@@ -2,13 +2,13 @@ import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, TypeVar
 
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -29,6 +29,20 @@ from app.ingest import run_ingestion, sync_developer_teams
 from app.models import PullRequest
 from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_snapshot
 from app.teams import load_team_config
+from app.devops_config import load_devops_config
+from app.devops_ingest import run_devops_ingestion
+from app.devops_metrics import (
+    StoryFilters,
+    compute_dora,
+    list_people,
+    list_tags,
+    markdown_report,
+    people_efficiency,
+    query_stories,
+    stories_csv,
+    summarize_stories,
+)
+from app.models import AzurePipelineRun, AzureWorkItem
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,6 +59,8 @@ CLIENT_CLOSED_REQUEST = 499
 _ingestion_lock = threading.Lock()
 # Outcome of the most recent sync, reported by GET /api/ingest/status.
 _last_ingestion: dict | None = None
+# Outcome of the most recent Azure DevOps sync, reported by GET /api/devops/sync/status.
+_last_devops_sync: dict | None = None
 
 # ---------------------------------------------------------------------------
 # Pydantic response models
@@ -101,6 +117,10 @@ class IngestRequest(BaseModel):
     lookback_days: int = 7
     # Re-download every PR in the lookback window, even ones unchanged on GitHub.
     full_refresh: bool = False
+
+
+class DevOpsSyncRequest(BaseModel):
+    lookback_days: int = 30
 
 
 class SnapshotItem(BaseModel):
@@ -544,6 +564,205 @@ def restore_snapshot(
         return SnapshotResultResponse(name=path.name, counts=counts)
     finally:
         _ingestion_lock.release()
+
+
+# ---------------------------------------------------------------------------
+# DevOps Integration (Azure Boards + Azure Pipelines)
+# ---------------------------------------------------------------------------
+
+
+def _story_filters(
+    date_from: date | None,
+    date_to: date | None,
+    tags: list[str],
+    tag_mode: str,
+    person: str | None,
+    team: str | None,
+    types: list[str],
+    status: str,
+) -> StoryFilters:
+    today = datetime.now(timezone.utc).date()
+    end = date_to or today
+    start = date_from or end - timedelta(days=29)
+    if start > end:
+        raise HTTPException(status_code=400, detail="date_from must be on or before date_to")
+    if tag_mode not in ("any", "all"):
+        raise HTTPException(status_code=400, detail="tag_mode must be 'any' or 'all'")
+    if status not in ("completed", "all"):
+        raise HTTPException(status_code=400, detail="status must be 'completed' or 'all'")
+    if team:
+        _resolve_teams(team)  # 404 for unknown teams
+    return StoryFilters(
+        date_from=start,
+        date_to=end,
+        tags=[tag for tag in tags if tag],
+        tag_mode=tag_mode,
+        person=person or None,
+        team=team or None,
+        types=[item for item in types if item],
+        status=status,
+    )
+
+
+def story_filters(
+    date_from: date | None = Query(None, description="Start of the date range (default: 30 days ago)"),
+    date_to: date | None = Query(None, description="End of the date range, inclusive (default: today)"),
+    tags: list[str] = Query(default=[], description="Work item tags; repeat the parameter for several"),
+    tag_mode: str = Query("any", description="'any' or 'all' of the tags"),
+    person: str | None = Query(None, description="GitHub login of a configured member, or an Azure identity"),
+    team: str | None = Query(None),
+    types: list[str] = Query(default=[], description="Work item types, e.g. 'User Story'"),
+    status: str = Query("completed", description="'completed' (closed in range) or 'all' (also open items)"),
+) -> StoryFilters:
+    return _story_filters(date_from, date_to, tags, tag_mode, person, team, types, status)
+
+
+@app.get("/api/devops/config")
+def devops_config(db: Session = Depends(get_db)):
+    """Azure DevOps connection settings (without the token) and stored data counts."""
+    config = load_devops_config()
+    return {
+        "configured": config.configured,
+        "missing": config.missing(),
+        "organization": config.organization_url,
+        "projects": config.projects,
+        "work_item_types": config.work_item_types,
+        "deployment_pattern": config.deployment_pattern,
+        "production_pattern": config.production_pattern,
+        "incidents_enabled": config.incidents_enabled,
+        "work_items": db.query(AzureWorkItem.id).count(),
+        "pipeline_runs": db.query(AzurePipelineRun.id).count(),
+        "last_sync": _last_devops_sync,
+    }
+
+
+def _background_devops_sync(lookback_days: int) -> None:
+    """Run the Azure DevOps sync; the caller holds ``_ingestion_lock``."""
+    global _last_devops_sync
+    db = SessionLocal()
+    result: dict = {"lookback_days": lookback_days}
+    try:
+        result.update(run_devops_ingestion(db, lookback_days=lookback_days).as_dict())
+        if settings.snapshot_after_sync:
+            try:
+                result["snapshot"] = save_snapshot(db, settings.snapshot_dir)["name"]
+            except Exception:
+                logger.exception("Could not save a snapshot after the Azure DevOps sync.")
+    except Exception as exc:
+        logger.exception("Azure DevOps sync failed.")
+        result["error"] = str(exc)
+    finally:
+        db.close()
+        result["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _last_devops_sync = result
+        _ingestion_lock.release()
+
+
+@app.post("/api/devops/sync", response_model=IngestStatusResponse, status_code=202)
+def devops_sync(
+    background_tasks: BackgroundTasks,
+    payload: DevOpsSyncRequest = Body(default_factory=DevOpsSyncRequest),
+):
+    """Fetch Azure Boards work items and Azure Pipelines runs changed in the last N days."""
+    config = load_devops_config()
+    if not config.configured:
+        raise HTTPException(status_code=400, detail="Azure DevOps is not configured: missing " + ", ".join(config.missing()))
+    if payload.lookback_days < 1:
+        raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
+    if not _ingestion_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A sync is already in progress.")
+    background_tasks.add_task(_background_devops_sync, payload.lookback_days)
+    return IngestStatusResponse(
+        status="accepted",
+        message=f"Azure DevOps sync started for items changed in the last {payload.lookback_days} days.",
+    )
+
+
+@app.get("/api/devops/sync/status", response_model=IngestStatusResponse)
+def devops_sync_status():
+    status = "running" if _ingestion_lock.locked() else "idle"
+    return IngestStatusResponse(status=status, message=f"Sync is {status}.", last_run=_last_devops_sync)
+
+
+@app.get("/api/devops/filters")
+def devops_filter_options(db: Session = Depends(get_db)):
+    """Values for the DevOps page filters: tags, people, work item types, teams."""
+    team_config = load_team_config()
+    types = [value for (value,) in db.query(AzureWorkItem.work_item_type).distinct().order_by(AzureWorkItem.work_item_type)]
+    return {
+        "tags": list_tags(db),
+        "people": list_people(db, team_config),
+        "types": types,
+        "teams": team_config.team_names,
+    }
+
+
+@app.get("/api/devops/stories")
+def devops_stories(filters: StoryFilters = Depends(story_filters), db: Session = Depends(get_db)):
+    """Filtered work items with a summary and per-person efficiency."""
+    team_config = load_team_config()
+    stories = query_stories(db, filters, team_config)
+    return {
+        "filters": filters.describe(),
+        "summary": summarize_stories(stories, filters),
+        "efficiency": people_efficiency(db, stories, filters, team_config),
+        "stories": stories,
+    }
+
+
+@app.get("/api/devops/dora")
+def devops_dora(filters: StoryFilters = Depends(story_filters), db: Session = Depends(get_db)):
+    """DORA metrics (DevLake definitions) for everyone, a team, or one person."""
+    return compute_dora(
+        db,
+        load_devops_config(),
+        load_team_config(),
+        filters.date_from,
+        filters.date_to,
+        person=filters.person,
+        team=filters.team,
+    )
+
+
+@app.get("/api/devops/report")
+def devops_report(
+    format: str = Query("markdown", description="'markdown' or 'csv'"),
+    filters: StoryFilters = Depends(story_filters),
+    db: Session = Depends(get_db),
+):
+    """Download a report of the filtered work items (CSV, or Markdown with summary, DORA and efficiency)."""
+    team_config = load_team_config()
+    stories = query_stories(db, filters, team_config)
+    stamp = f"{filters.date_from:%Y%m%d}-{filters.date_to:%Y%m%d}"
+    if format == "csv":
+        return Response(
+            stories_csv(stories),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="devops-stories-{stamp}.csv"'},
+        )
+    if format != "markdown":
+        raise HTTPException(status_code=400, detail="format must be 'markdown' or 'csv'")
+    dora = compute_dora(
+        db,
+        load_devops_config(),
+        team_config,
+        filters.date_from,
+        filters.date_to,
+        person=filters.person,
+        team=filters.team,
+    )
+    report = markdown_report(
+        filters,
+        summarize_stories(stories, filters),
+        people_efficiency(db, stories, filters, team_config),
+        stories,
+        dora,
+    )
+    return Response(
+        report,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="devops-report-{stamp}.md"'},
+    )
 
 
 # ---------------------------------------------------------------------------

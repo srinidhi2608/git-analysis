@@ -6,6 +6,7 @@ It pulls PRs, reviews, review comments and commits for the repositories you choo
 
 - **Team overview**: for all teams or one selected team, PR cycle time, merged PRs per week, and **DORA-inspired delivery metrics** (merge frequency, lead time, time to first review, review coverage, approval rate, change-failure proxy, recovery time) with weekly trends.
 - **Individual performance**: for each developer, PR size, review-comment density, requested-changes rate, rework after feedback, follow-up speed, recurring review themes, top reviewers and the languages they work in.
+- **DevOps Integration (optional)**: connects **Azure Boards** (user stories, bugs, tasks) and **Azure Pipelines** (deployments) to the GitHub data. You can filter stories by tag, date range, team or person, export reports, see each developer's and tester's delivery, and get **DORA metrics** (deployment frequency, lead time for changes, change failure rate, failed deployment recovery time) for the team or a single person. The definitions follow [Apache DevLake](https://devlake.apache.org/).
 - **AI summary (optional)**: written strengths, improvement areas, design-pattern and DRY/WET notes. These come from an online LLM (OpenAI or Gemini) or a local [Ollama](https://ollama.com) model, based on the actual review comments. A rule-based fallback always works, so no AI setup is required.
 
 > These metrics are signals to start a conversation, not a performance verdict. The AI and heuristic scores come from review comments and PR metadata only. They don't look at the code itself.
@@ -20,21 +21,24 @@ It pulls PRs, reviews, review comments and commits for the repositories you choo
 4. [Getting data into the dashboard](#4-getting-data-into-the-dashboard)
 5. [Running the API and UI separately (without Docker)](#5-running-the-api-and-ui-separately-without-docker)
 6. [AI analysis (optional)](#6-ai-analysis-optional)
-7. [API reference](#7-api-reference)
-8. [What the metrics mean](#8-what-the-metrics-mean)
-9. [Project layout](#9-project-layout)
-10. [Running the tests](#10-running-the-tests)
-11. [Troubleshooting](#11-troubleshooting)
+7. [DevOps Integration (Azure DevOps)](#7-devops-integration-azure-devops)
+8. [API reference](#8-api-reference)
+9. [What the metrics mean](#9-what-the-metrics-mean)
+10. [Project layout](#10-project-layout)
+11. [Running the tests](#11-running-the-tests)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
 ## 1) How it works
 
 ```
-config.yaml ──► GitHub GraphQL API ──► ingestion (POST /api/ingest) ──► PostgreSQL
-(repos)                                                                     │
+config.yaml ──► GitHub GraphQL API ──► ingestion (POST /api/ingest) ─────────┐
+(repos, teams)                                                              ▼
+              Azure DevOps REST API ──► DevOps sync (POST /api/devops/sync) ─► PostgreSQL
+              (Boards work items, Pipelines runs)                           │
                                                                             ▼
- Browser ◄── React dashboard ◄── FastAPI (/api/*) ◄── metrics, DORA proxies, developer analytics
+ Browser ◄── React dashboard ◄── FastAPI (/api/*) ◄── metrics, DORA, developer analytics, story reports
                                                         └─► AI summary: Online LLM → Ollama → rule-based
 ```
 
@@ -44,6 +48,7 @@ config.yaml ──► GitHub GraphQL API ──► ingestion (POST /api/ingest) 
 | Dashboard UI | React 19, TypeScript, Vite, Tailwind, Recharts | `frontend/` |
 | Database | PostgreSQL 16 | Docker volume `postgres_data` |
 | AI (optional) | OpenAI / Gemini API, or a local Ollama model | `app/ai_analyzers.py` |
+| Azure DevOps (optional) | Azure DevOps REST API 7.1 (Boards + Pipelines) | `app/azure_devops.py`, `app/devops_*.py` |
 
 In the Docker setup, one container serves **both the API and the built UI on port 8000**. During local development the UI runs on the Vite dev server (port 5173), which forwards `/api/*` requests to the backend.
 
@@ -165,6 +170,7 @@ All settings are environment variables. The backend reads them from `.env` in th
 | `OLLAMA_BASE_URL` | no | `http://localhost:11434` (local) / `http://host.docker.internal:11434` (Compose) | Ollama server (tier 2) |
 | `OLLAMA_MODEL` | no | `qwen2.5-coder:14b` | Ollama model name |
 | `DEVELOPER_ANALYTICS_AI_URL` / `_TOKEN` / `_MODEL` | no | – | Optional OpenAI-compatible chat-completions endpoint for the developer *overview narrative*. If unset, a rule-based narrative is used |
+| `AZURE_DEVOPS_PAT` | no | – | Azure DevOps personal access token (Work Items: Read, Build: Read) for the DevOps Integration page |
 | `SNAPSHOT_DIR` | no | `snapshots` | Where snapshots are written (`./snapshots` on the host with Docker Compose) |
 | `SNAPSHOT_AUTOLOAD` | no | `true` | Load the newest snapshot at startup when the database has no pull requests |
 | `SNAPSHOT_AFTER_SYNC` | no | `true` | Save a snapshot automatically after every successful sync |
@@ -390,7 +396,135 @@ Running a model on CPU is slow, and a request taking more than 60 s falls back t
 
 ---
 
-## 7) API reference
+## 7) DevOps Integration (Azure DevOps)
+
+The **DevOps Integration** tab adds Azure DevOps to the GitHub data, for setups like this one:
+
+- **Azure Boards** holds the user stories, bugs and tasks, assigned to developers and testers.
+- **Azure Pipelines** builds and deploys the GitHub repositories' branches.
+- **GitHub PRs** reference their story with `AB#<work item id>` in the title. This is the Azure Boards GitHub integration convention, e.g. `AB#11353 pre auth`.
+
+It is modelled on [Apache DevLake](https://github.com/apache/devlake)'s Azure DevOps and DORA plugins. It uses the same deployment rules, the same lead time definition, and DevLake's DORA 2023 benchmarks. It all runs inside this application, so DevLake doesn't need to be installed.
+
+### 7.1 What the page shows
+
+| Section | What you get |
+|---|---|
+| **Filters** | Date range (with 7/30/90-day shortcuts), team, developer/tester, work item types, **tags** (any or all of the selected tags), and finished-only or finished + open items. Every section below follows the filters. |
+| **DORA metrics** | Deployment frequency, lead time for changes, change failure rate and failed deployment recovery time, each with its **Elite / High / Medium / Low** level, plus a weekly chart of deployments and lead time. With a person or team selected, the metrics are computed for the deployments that shipped **their** pull requests. |
+| **Story summary** | Items finished, story points, throughput per week, median cycle time (active → closed), median lead time (created → closed), GitHub PRs linked via `AB#`. |
+| **Efficiency by developer / tester** | Per person, in the date range: work items finished, story points, median cycle time, items per week, share of the team's finished items, **bugs reported** (useful for testers) and GitHub PRs merged. Click a row to see that person's DORA metrics. |
+| **Work items** | The filtered stories with links to Azure Boards, tags, points, closed date, cycle time and linked PRs. |
+| **Reports** | **⬇ CSV** (all filtered work items) and **⬇ Report (Markdown)**: filters, summary, DORA table, efficiency table and the work item list, ready to paste into a wiki or email. **Print** prints the page. |
+
+### 7.2 Connect the application to Azure DevOps
+
+**Step 1: Create a personal access token (PAT)**
+
+1. In Azure DevOps, open **User settings** (top right) → **Personal access tokens** → **New Token**.
+2. Choose the organization that holds your boards and pipelines.
+3. Under **Scopes**, choose *Custom defined* and tick **Work Items → Read** and **Build → Read**.
+4. Create the token and copy it.
+
+**Step 2: Add the token to `.env`**
+
+```env
+AZURE_DEVOPS_PAT=your-token-here
+```
+
+**Step 3: Configure `config.yaml`**
+
+```yaml
+azure_devops:
+  organization: "your-org"            # https://dev.azure.com/your-org (a full URL also works)
+  projects: ["Payments"]              # Azure DevOps project names
+  work_item_types: ["User Story", "Bug", "Task"]
+  # Pipelines whose name matches this regex are deployments ...
+  deployment_pattern: "(?i)deploy|release"
+  # ... and these go to production (leave empty to count every deployment).
+  production_pattern: "(?i)prod"
+  # Optional: work items that are production incidents (see 7.4).
+  incidents:
+    work_item_types: ["Bug"]
+    tags: ["Incident"]
+```
+
+**Step 4: Link people across GitHub and Azure DevOps**
+
+Add each member's Azure DevOps email (as shown in *Assigned To*) and role to `teams`:
+
+```yaml
+teams:
+  GrowthTeam:
+    - name: "CF-Vaishnavi"              # GitHub login
+      azure: "vaishnavi@company.com"    # Azure DevOps identity (or a list of identities)
+      role: developer
+    - name: "CF-SinchanaBhat"
+      azure: "sinchana@company.com"
+      role: tester
+```
+
+Without `azure:`, an identity whose email local part equals the GitHub login is matched automatically.
+
+As with GitHub data, when `teams` is configured only work items **assigned to or created by** listed members are stored, and everyone else is logged as `not in any team: ...`. Pipeline runs are not person-specific and are always stored.
+
+**Step 5: Restart and sync**
+
+```bash
+docker compose up -d --build     # or restart the backend
+```
+
+Open **DevOps Integration** and click **⟳ Sync Azure DevOps**. Choose how many days back to fetch; 90 is a good first sync. The sync fetches:
+
+- work items of the configured types **changed** in that window (WIQL + `workitemsbatch`, 200 at a time)
+- **completed** pipeline runs finished in that window (Builds API, paged)
+
+Re-syncing updates existing rows. The data is included in snapshots (section 4.4).
+
+From the command line:
+
+```bash
+curl -X POST http://localhost:8000/api/devops/sync -H "Content-Type: application/json" -d '{"lookback_days": 90}'
+curl http://localhost:8000/api/devops/sync/status
+```
+
+**Lead time needs the merge commit.** PRs synced from GitHub now store their merge commit SHA, so a deployment of exactly that commit is matched. PRs synced before this version get it on the next GitHub sync with **Full refresh on sync**. Until then they fall back to "the first production deployment of that repository after the merge".
+
+**Self-hosted Azure DevOps Server** (2022.1 or later, which supports REST API 7.1): set `organization` to the full collection URL, e.g. `https://ado.company.com/tfs/DefaultCollection`.
+
+### 7.3 Try it with demo data
+
+```bash
+# after the GitHub sample data (section 4.3):
+docker compose exec db psql -U git_user -d git_analysis -f /scripts/seed_devops.sql
+```
+
+This adds 22 work items (stories, testing tasks, bugs and 2 incidents) and about 70 pipeline runs for the last 6 weeks. It also links the sample PRs to stories with `AB#` and fills the DevOps Integration page. Without a PAT the page shows "Not configured", but the stored demo data is still displayed. To see roles and the per-person view, use the `teams` example at the top of `scripts/seed_devops.sql`.
+
+### 7.4 How the DORA metrics are calculated
+
+The definitions follow Apache DevLake (`backend/plugins/dora`), and the levels use the **DORA 2023** benchmarks from DevLake.
+
+| Metric | Calculation | Elite | High | Medium | Low |
+|---|---|---|---|---|---|
+| **Deployment frequency** | Successful production deployments. The level comes from the median number of *days with a deployment* per week (and per month) in the range | ≥ 5 days/week (on-demand) | ≥ 1 day/week | ≥ 1 day/month | fewer |
+| **Lead time for changes** | Median of PR *first commit* → finish of the production deployment that shipped it | < 1 day | < 1 week | < 1 month | longer |
+| **Change failure rate** | Deployments that caused an incident ÷ deployments; without incidents configured, failed deployment runs ÷ all deployment runs | ≤ 5% | ≤ 10% | ≤ 15% | > 15% |
+| **Failed deployment recovery time** | Median of deployment finish → incident closed; without incidents, failed run → next successful run of the same pipeline | < 1 hour | < 1 day | < 1 week | longer |
+
+The underlying rules:
+
+- **Deployments:** completed runs of pipelines whose name matches `deployment_pattern`, and `production_pattern` if set. `succeeded` and `partiallySucceeded` count as success; `failed`, `canceled` and `none` count as failure. These are DevLake's Azure DevOps mappings.
+- **Which deployment shipped a PR:** the successful production deployment whose commit equals the PR's merge commit. Otherwise it's the first successful production deployment of the same repository after the merge. Azure Pipelines reports GitHub repositories as `owner/repo`, which matches `config.yaml`.
+- **Incidents:** work items matching `incidents` (type and/or tag). As in DevLake, each incident is attributed to the **last successful production deployment before it was created**.
+- **Person / team scope:** the same metrics, restricted to deployments that shipped that person's or team's PRs. Change failure rate then uses each PR's first deployment attempt after the merge.
+- **Stories:** cycle time is *Activated → Closed* (Created → Closed if never activated); lead time is *Created → Closed*. "Finished in range" means the *Closed* date is in the range.
+
+**Sources:** the [DevLake GitHub data source demo](https://devlake.apache.org/livedemo/DataSources/GitHub/), [DevLake source code](https://github.com/apache/devlake), and [Atlassian's overview of DORA metrics](https://www.atlassian.com/devops/frameworks/dora-metrics).
+
+---
+
+## 8) API reference
 
 Full interactive documentation: **<http://localhost:8000/docs>**.
 
@@ -412,18 +546,26 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/ingest/status` | `running` or `idle`, plus `last_run` statistics (PRs updated, unchanged, GitHub requests, snapshot saved) |
 | GET | `/api/snapshots` | Saved snapshots, newest first |
 | POST | `/api/snapshots` | Save a snapshot of the current data |
+| GET | `/api/devops/config` | Azure DevOps connection status (no secrets) and stored counts |
+| POST | `/api/devops/sync` | Start an Azure DevOps sync. Body: `{"lookback_days": 30}`. `400` if not configured, `409` if a sync is running |
+| GET | `/api/devops/sync/status` | `running` / `idle` plus `last_run` statistics |
+| GET | `/api/devops/filters` | Tags (with counts), people (with role/team), work item types, teams |
+| GET | `/api/devops/stories` | Filtered work items + summary + efficiency by person |
+| GET | `/api/devops/dora` | DORA metrics for everyone, `?team=` or `?person=` |
+| GET | `/api/devops/report` | Download `?format=csv` or `?format=markdown` for the filtered work items |
 | POST | `/api/snapshots/load` | Load the newest snapshot (or `{"name": ...}`), upserting into the database |
 
 Query parameters:
 
 - `?days=N` (default `30`): the window, i.e. PRs created or merged in the last N days. Applies to `/api/team-performance`, `/api/dora/*`, `/api/developers/{username}/dora` and `/api/chart/*`. The dashboard sends its **Lookback** value.
+- DevOps endpoints take `date_from` / `date_to` (`YYYY-MM-DD`, default the last 30 days), repeatable `tags` and `types`, `tag_mode=any|all`, `person`, `team` and `status=completed|all`.
 - `?team=<TeamName>`: scopes the team-level endpoints (`/api/team-performance`, `/api/dora/team`, `/api/developers`, `/api/chart/*`) to one configured team. An unknown team returns `404`. Without it, they cover all configured teams, or everyone when no teams are configured.
 
 > **Security note:** the API has **no authentication**. Anyone who can reach the port can read the metrics and trigger syncs (which use your GitHub token's rate limit). Run it on a trusted network or behind an authenticating reverse proxy.
 
 ---
 
-## 8) What the metrics mean
+## 9) What the metrics mean
 
 This project only sees GitHub data (PRs, reviews, comments, commits), not deployments or incidents. So the delivery metrics are **GitHub-based proxies inspired by DORA**, not real DORA metrics.
 
@@ -448,7 +590,7 @@ The **Provider** tag on a developer's card names the analyzer that produced the 
 
 ---
 
-## 9) Project layout
+## 10) Project layout
 
 ```
 app/
@@ -457,6 +599,10 @@ app/
   config_loader.py      Reads config.yaml (repositories)
   teams.py              Reads config.yaml teams, member filter, skipped-author log
   snapshot.py           Save / load data snapshots (gzipped JSON)
+  azure_devops.py       Azure DevOps REST client (work items, pipeline runs)
+  devops_config.py      azure_devops settings from config.yaml / .env
+  devops_ingest.py      Azure DevOps sync (upsert, team filter)
+  devops_metrics.py     Story filters, efficiency, DORA (DevLake definitions), reports
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
@@ -466,7 +612,7 @@ app/
   developer_analytics.py  Per-developer review analytics + narrative
   ai_analyzers.py       Online LLM → Ollama → rule-based analyzer
 frontend/               React + Vite dashboard (src/components/GitAnalyticsDashboard.tsx)
-scripts/                seed_data.sql (demo data), clear_data.sql (wipe data)
+scripts/                seed_data.sql (demo data), seed_devops.sql (Azure demo data), clear_data.sql (wipe data)
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse
 snapshots/              Data snapshots (created by the app; git-ignored)
@@ -477,7 +623,7 @@ docker-compose.yml      PostgreSQL + app (+ optional Ollama)
 
 ---
 
-## 10) Running the tests
+## 11) Running the tests
 
 The backend tests use an in-memory SQLite database and need no PostgreSQL, GitHub token or LLM:
 
@@ -496,10 +642,14 @@ npm run build
 
 ---
 
-## 11) Troubleshooting
+## 12) Troubleshooting
 
 | Symptom | Fix |
 |---|---|
+| DevOps page says "Not configured" | Set `AZURE_DEVOPS_PAT` in `.env` and `azure_devops.organization` / `projects` in `config.yaml`, then restart (section 7.2) |
+| Azure sync fails with "rejected the credentials" | The PAT is expired, belongs to another organization, or lacks the **Work Items: Read** / **Build: Read** scopes |
+| DORA shows "No production deployments" | `deployment_pattern` / `production_pattern` don't match your pipeline names; the page header shows the patterns in use |
+| A person's Azure work items appear under an email instead of their GitHub login | Add `azure: <their Azure DevOps email>` to their entry in `teams` |
 | A developer is missing after a sync | They aren't listed under `teams` in `config.yaml` (check the "not in any team" lines in the log), or their login is misspelled |
 | Dashboard is empty | Click **⟳ Sync from GitHub**, or [load the sample data](#43-load-sample-demo-data). Check `config.yaml` lists the right repositories |
 | Sync finishes but nothing appears | Check `docker compose logs app`. *"GitHub rejected the request (401/403)"* means the token is invalid or lacks access to the repository. Also try a bigger Lookback: only PRs updated in that window are imported |

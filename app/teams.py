@@ -4,7 +4,9 @@ Example::
 
     teams:
       GrowthTeam:
-        - name: "CF-Vaishnavi"
+        - name: "CF-Vaishnavi"            # GitHub login
+          azure: "vaishnavi@company.com"  # optional: Azure DevOps identity (email)
+          role: developer                 # optional: developer | tester
         - name: "CF-SinchanaBhat"
       IppPayFac:
         - name: "CF-NewMember"
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Data kinds tracked for skipped (non-member) authors, in log order.
-SKIP_KINDS = ("pull_request", "review", "comment", "commit")
+SKIP_KINDS = ("pull_request", "review", "comment", "commit", "work_item")
 
 
 @dataclass
@@ -37,6 +39,10 @@ class TeamConfig:
 
     teams: dict[str, list[str]] = field(default_factory=dict)
     _member_team: dict[str, str] = field(default_factory=dict, repr=False)
+    _member_role: dict[str, str] = field(default_factory=dict, repr=False)
+    _canonical_login: dict[str, str] = field(default_factory=dict, repr=False)
+    # Azure DevOps identity (email / unique name / display name, lower-cased) -> GitHub login
+    _azure_login: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
     def enabled(self) -> bool:
@@ -56,6 +62,46 @@ class TeamConfig:
         if not self.enabled:
             return True
         return self.team_for(login) is not None
+
+    def role_for(self, login: str | None) -> str | None:
+        if not login:
+            return None
+        return self._member_role.get(login.lower())
+
+    def members(self) -> list[dict[str, str | None]]:
+        """All configured members with their team, role and Azure identities."""
+        azure_by_login: dict[str, list[str]] = {}
+        for identity, login in self._azure_login.items():
+            azure_by_login.setdefault(login.lower(), []).append(identity)
+        return [
+            {
+                "login": login,
+                "team": team,
+                "role": self._member_role.get(login.lower()),
+                "azure": ", ".join(sorted(azure_by_login.get(login.lower(), []))) or None,
+            }
+            for team, logins in self.teams.items()
+            for login in logins
+        ]
+
+    def login_for_azure(self, *identities: str | None) -> str | None:
+        """Map an Azure DevOps identity (email, unique name or display name) to a member's GitHub login.
+
+        Falls back to matching the GitHub login itself (or an email's local part)
+        when no ``azure`` alias is configured.
+        """
+        for identity in identities:
+            if not identity:
+                continue
+            key = identity.strip().lower()
+            if key in self._azure_login:
+                return self._azure_login[key]
+            if key in self._canonical_login:
+                return self._canonical_login[key]
+            local_part = key.split("@", 1)[0]
+            if "@" in key and local_part in self._canonical_login:
+                return self._canonical_login[local_part]
+        return None
 
 
 def _member_name(entry: object) -> str | None:
@@ -92,7 +138,16 @@ def parse_team_config(data: dict | None) -> TeamConfig:
                 )
                 continue
             config._member_team[login.lower()] = team
+            config._canonical_login[login.lower()] = login
             config.teams[team].append(login)
+            if isinstance(entry, dict):
+                role = entry.get("role")
+                if isinstance(role, str) and role.strip():
+                    config._member_role[login.lower()] = role.strip().lower()
+                aliases = entry.get("azure") or []
+                for alias in [aliases] if isinstance(aliases, str) else aliases:
+                    if isinstance(alias, str) and alias.strip():
+                        config._azure_login[alias.strip().lower()] = login
     return config
 
 
@@ -126,7 +181,7 @@ class SkippedAuthors:
         if not self._counts:
             return
         logger.warning(
-            "Skipped data from %d GitHub user(s) not listed under 'teams' in config.yaml:",
+            "Skipped data from %d user(s) not listed under 'teams' in config.yaml:",
             len(self._counts),
         )
         for login in sorted(self._counts, key=str.lower):

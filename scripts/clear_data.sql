@@ -9,5 +9,8 @@ TRUNCATE
   commits,
   pull_requests,
   developers,
-  repositories
+  repositories,
+  azure_work_item_tags,
+  azure_work_items,
+  azure_pipeline_runs
 RESTART IDENTITY CASCADE;

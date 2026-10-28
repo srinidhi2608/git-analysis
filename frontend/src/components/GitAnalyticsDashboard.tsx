@@ -12,8 +12,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import DevOpsIntegrationPage from "./DevOpsIntegrationPage";
 
-type TabKey = "team" | "individual";
+type TabKey = "team" | "individual" | "devops";
 type IndivTabKey = "summary" | "dora" | "ai_metrics" | "reviewers";
 
 type TrendDirection = "up" | "down";
@@ -1387,6 +1388,15 @@ export default function GitAnalyticsDashboard() {
                 >
                   Individual Performance
                 </button>
+                <button
+                  className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                    activeTab === "devops" ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"
+                  }`}
+                  onClick={() => setActiveTab("devops")}
+                  type="button"
+                >
+                  DevOps Integration
+                </button>
               </div>
             </div>
           </div>
@@ -1432,6 +1442,10 @@ export default function GitAnalyticsDashboard() {
           {error && <p className="mt-3 rounded-lg bg-red-900/40 px-4 py-2 text-sm text-red-300">{error}</p>}
         </div>
 
+        {activeTab === "devops" ? (
+          <DevOpsIntegrationPage />
+        ) : (
+          <>
         {(teams.length > 0 || (!isTeamView && developers.length > 0)) && (
           <div className="flex flex-wrap items-center gap-3">
             {teams.length > 0 && (
@@ -1573,6 +1587,8 @@ export default function GitAnalyticsDashboard() {
             doraError={indivDoraError}
             thresholds={thresholds}
           />
+        )}
+          </>
         )}
       </div>
     </div>
