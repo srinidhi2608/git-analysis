@@ -47,10 +47,13 @@ COPY --from=node-builder /build/frontend/dist ./frontend/dist/
 # Non-root user for security. The entrypoint starts as root only to make the
 # bind-mounted ./snapshots directory writable, then runs the app as appuser.
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN adduser --disabled-password --gecos "" --uid 1000 appuser && \
+# Strip Windows line endings (a CRLF checkout breaks the "#!/bin/sh" line with
+# "exec ... no such file or directory").
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/entrypoint.sh && \
+    adduser --disabled-password --gecos "" --uid 1000 appuser && \
     mkdir -p /app/snapshots && \
-    chown -R appuser:appuser /app && \
-    chmod +x /usr/local/bin/entrypoint.sh
+    chown -R appuser:appuser /app
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 EXPOSE 8000
