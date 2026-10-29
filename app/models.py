@@ -56,6 +56,8 @@ class PullRequest(Base):
     # GitHub's updatedAt when this PR was last ingested; an unchanged value lets a
     # re-sync skip downloading the PR's details again.
     github_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Merge commit SHA, used to find the deployment that shipped this PR (DORA lead time).
+    merge_commit_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     repository: Mapped["Repository"] = relationship("Repository", back_populates="pull_requests")
     developer: Mapped["Developer"] = relationship("Developer", back_populates="pull_requests")
@@ -92,3 +94,76 @@ class PullRequestComment(Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     pull_request: Mapped["PullRequest"] = relationship("PullRequest", back_populates="comments")
+
+
+# ---------------------------------------------------------------------------
+# Azure DevOps (Boards work items and Pipelines runs)
+# ---------------------------------------------------------------------------
+
+
+class AzureWorkItem(Base):
+    """A work item (user story, bug, task, ...) from Azure Boards."""
+
+    __tablename__ = "azure_work_items"
+
+    # Azure DevOps work item ids are unique within an organization.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    project: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    work_item_type: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(1024), nullable=False)
+    state: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    assigned_to: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    assigned_to_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_by_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    created_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    activated_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    resolved_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    closed_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    changed_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    story_points: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    iteration_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    area_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+
+    tags: Mapped[list["AzureWorkItemTag"]] = relationship(
+        "AzureWorkItemTag", back_populates="work_item", cascade="all, delete-orphan"
+    )
+
+
+class AzureWorkItemTag(Base):
+    __tablename__ = "azure_work_item_tags"
+    __table_args__ = (UniqueConstraint("work_item_id", "tag", name="uq_azure_work_item_tag"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    work_item_id: Mapped[int] = mapped_column(Integer, ForeignKey("azure_work_items.id"), nullable=False, index=True)
+    tag: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+
+    work_item: Mapped["AzureWorkItem"] = relationship("AzureWorkItem", back_populates="tags")
+
+
+class AzurePipelineRun(Base):
+    """A completed Azure Pipelines build/run (deployments are identified by pipeline name patterns)."""
+
+    __tablename__ = "azure_pipeline_runs"
+    __table_args__ = (UniqueConstraint("project", "build_id", name="uq_azure_pipeline_run"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project: Mapped[str] = mapped_column(String(255), nullable=False)
+    build_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    build_number: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    definition_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    definition_name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    status: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    result: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    source_branch: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    source_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    repository_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, index=True)
+    repository_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    requested_for: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    requested_for_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    queue_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    start_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finish_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)

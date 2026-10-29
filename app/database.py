@@ -101,6 +101,7 @@ def ensure_database_schema():
         "first_review_comment_at": _compile_column_definition(DateTime()),
         "last_review_comment_at": _compile_column_definition(DateTime()),
         "github_updated_at": _compile_column_definition(DateTime()),
+        "merge_commit_sha": _compile_column_definition(String(64)),
     }
     commit_alterations = {
         "committed_at": _compile_column_definition(DateTime()),

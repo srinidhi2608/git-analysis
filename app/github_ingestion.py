@@ -52,6 +52,7 @@ PR_DETAIL_SELECTION = """
 number
 title
 updatedAt
+mergeCommit { oid }
 createdAt
 mergedAt
 closedAt
@@ -422,6 +423,7 @@ query({", ".join(variable_definitions)}) {{
             "created_at": node["createdAt"],
             "merged_at": node.get("mergedAt"),
             "updated_at": node.get("updatedAt"),
+            "merge_commit_sha": (node.get("mergeCommit") or {}).get("oid"),
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
             "changed_files": node.get("changedFiles") or 0,
