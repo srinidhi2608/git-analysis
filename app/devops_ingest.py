@@ -36,6 +36,8 @@ class DevOpsSyncStats:
     work_items: int = 0
     pipeline_runs: int = 0
     skipped_work_items: int = 0
+    # Azure DevOps identities whose work items were skipped (not linked to a team member).
+    skipped_identities: list[dict] = field(default_factory=list)
     azure_requests: int = 0
     projects: list[str] = field(default_factory=list)
 
@@ -147,7 +149,10 @@ def run_devops_ingestion(
         logger.info("Fetching Azure DevOps work items and pipeline runs for %s.", project)
         for data in client.fetch_work_items(project, since):
             if not _belongs_to_team(data, team_config):
-                skipped.record(data.get("assigned_to_email") or data.get("assigned_to"), "work_item", project)
+                identity = data.get("assigned_to_email") or data.get("assigned_to")
+                if identity and data.get("assigned_to") and data.get("assigned_to_email"):
+                    identity = f"{data['assigned_to']} <{data['assigned_to_email']}>"
+                skipped.record(identity or data.get("created_by_email") or data.get("created_by"), "work_item", project)
                 stats.skipped_work_items += 1
                 continue
             upsert_work_item(db, data)
@@ -159,6 +164,10 @@ def run_devops_ingestion(
         db.commit()
 
     stats.azure_requests = client.request_count
+    stats.skipped_identities = sorted(
+        ({"identity": identity, "work_items": counts.get("work_item", 0)} for identity, counts in skipped.as_dict().items()),
+        key=lambda item: -item["work_items"],
+    )[:50]
     skipped.log_summary()
     logger.info(
         "Azure DevOps sync complete: %d work item(s), %d pipeline run(s), %d API request(s).",

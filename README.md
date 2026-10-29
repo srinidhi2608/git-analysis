@@ -202,15 +202,32 @@ These tune scoring and the red/green indicators on the dashboard. All are option
 ```yaml
 teams:
   GrowthTeam:
-    - name: "CF-Vaishnavi"
-    - name: "CF-SinchanaBhat"
-    - name: "CF-SrinidhiCV"
-    - name: "CF-SantoshHM"
+    - name: "Vaishnavi K"                       # display name shown on every page
+      github: "CF-Vaishnavi"                    # GitHub login
+      azure_devops: "vaishnavi.k@company.com"   # Azure DevOps identity (optional, see section 7)
+      role: developer                           # optional: developer | tester
+    - name: "Sinchana Bhat"
+      github: "CF-SinchanaBhat"
+      azure_devops: ["sinchana.b@company.com", "Sinchana B"]   # several identities are fine
+      role: tester
+    - name: "Santosh HM"
+      github: "CF-SantoshHM"
   IppPayFac:
-    - name: "CF-NewMember"
+    - name: "CF-NewMember"                      # short form: name is the GitHub login
 ```
 
-- Each `name` is a **GitHub login**. Matching is case-insensitive. A login listed in two teams stays in the first one, and a warning is logged.
+Each member is **one person**, who often has different names in GitHub and Azure DevOps:
+
+| Key | Meaning |
+|---|---|
+| `name` | Display name used on every page: dropdowns, charts, tables and reports |
+| `github` | GitHub login. Leave it out for someone with no GitHub account (e.g. a QA engineer who only works in Azure Boards) |
+| `azure_devops` | The person's Azure DevOps identity as shown in *Assigned To*: email / unique name (e.g. `DOMAIN\user` on Azure DevOps Server), or display name. One value or a list |
+| `role` | `developer` or `tester`, shown on the DevOps Integration page |
+
+- **Short form:** an entry with only `name` (or a plain string) treats `name` as the GitHub login. That's the older format, and it keeps working. The older `azure:` key is also accepted for `azure_devops`.
+- **Matching** is case-insensitive. A person listed in two teams stays in the first one, and an Azure DevOps identity configured for two people stays with the first. Both cases log a warning.
+- **Checking the links:** the **People & identities** panel on the DevOps Integration page (or `GET /api/people`) shows each person's GitHub login and Azure DevOps identities, how many PRs and work items matched them, and the Azure identities that match nobody.
 - **Only listed members are synced.** PRs opened by anyone else are skipped before their details are downloaded. On members' PRs, reviews, comments and commits written by non-members are not stored either. Commits whose author email isn't linked to a GitHub account count as the PR author's.
 - PR-level review signals on a member's PR are kept as GitHub reports them, even when the reviewer isn't a member: review/approval/requested-changes counts, and first/last feedback time. A member's PR approved by someone outside the teams still counts as reviewed.
 - **Skipped people are logged** at the end of every sync, so you can spot anyone missing from the list:
@@ -451,20 +468,29 @@ azure_devops:
 
 **Step 4: Link people across GitHub and Azure DevOps**
 
-Add each member's Azure DevOps email (as shown in *Assigned To*) and role to `teams`:
+GitHub logins and Azure DevOps names are usually different. List each person once under `teams`, with both identities and the name to show on the pages:
 
 ```yaml
 teams:
   GrowthTeam:
-    - name: "CF-Vaishnavi"              # GitHub login
-      azure: "vaishnavi@company.com"    # Azure DevOps identity (or a list of identities)
+    - name: "Vaishnavi K"                       # shown on the pages and in reports
+      github: "CF-Vaishnavi"                    # GitHub login
+      azure_devops: "vaishnavi.k@company.com"   # as shown in Azure Boards "Assigned To"
       role: developer
-    - name: "CF-SinchanaBhat"
-      azure: "sinchana@company.com"
+    - name: "Tom QA"                            # a tester with no GitHub account
+      azure_devops: ["tom.q@company.com", "Tom Quinn"]
       role: tester
 ```
 
-Without `azure:`, an identity whose email local part equals the GitHub login is matched automatically.
+To find the exact Azure DevOps identities, open a work item and hover over *Assigned To*. Or sync once and open **People & identities** on the DevOps Integration page: it lists every Azure identity in the data that isn't linked yet, with a ready-to-edit `config.yaml` snippet. The sync status also names the identities it skipped.
+
+Matching order for an Azure identity:
+
+1. the person's `azure_devops` values
+2. their `name` (if it equals their Azure display name)
+3. their GitHub login, or an email whose part before `@` is the GitHub login
+
+Across all pages, filters and reports show the `name`. The underlying data still uses the GitHub login, so a person's GitHub PRs and Azure work items are counted together: in their efficiency row, in "PRs merged", and in their person-level DORA metrics.
 
 As with GitHub data, when `teams` is configured only work items **assigned to or created by** listed members are stored, and everyone else is logged as `not in any team: ...`. Pipeline runs are not person-specific and are always stored.
 
@@ -546,6 +572,7 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/ingest/status` | `running` or `idle`, plus `last_run` statistics (PRs updated, unchanged, GitHub requests, snapshot saved) |
 | GET | `/api/snapshots` | Saved snapshots, newest first |
 | POST | `/api/snapshots` | Save a snapshot of the current data |
+| GET | `/api/people` | Configured people with their GitHub login, Azure DevOps identities and matched PR / work item counts, plus unlinked Azure identities |
 | GET | `/api/devops/config` | Azure DevOps connection status (no secrets) and stored counts |
 | POST | `/api/devops/sync` | Start an Azure DevOps sync. Body: `{"lookback_days": 30}`. `400` if not configured, `409` if a sync is running |
 | GET | `/api/devops/sync/status` | `running` / `idle` plus `last_run` statistics |
@@ -649,7 +676,7 @@ npm run build
 | DevOps page says "Not configured" | Set `AZURE_DEVOPS_PAT` in `.env` and `azure_devops.organization` / `projects` in `config.yaml`, then restart (section 7.2) |
 | Azure sync fails with "rejected the credentials" | The PAT is expired, belongs to another organization, or lacks the **Work Items: Read** / **Build: Read** scopes |
 | DORA shows "No production deployments" | `deployment_pattern` / `production_pattern` don't match your pipeline names; the page header shows the patterns in use |
-| A person's Azure work items appear under an email instead of their GitHub login | Add `azure: <their Azure DevOps email>` to their entry in `teams` |
+| A person's Azure work items appear under their Azure name instead of their configured `name` | Their Azure identity isn't linked: add it to their `azure_devops` list in `teams` (the **People & identities** panel lists unlinked identities) |
 | A developer is missing after a sync | They aren't listed under `teams` in `config.yaml` (check the "not in any team" lines in the log), or their login is misspelled |
 | Dashboard is empty | Click **⟳ Sync from GitHub**, or [load the sample data](#43-load-sample-demo-data). Check `config.yaml` lists the right repositories |
 | Sync finishes but nothing appears | Check `docker compose logs app`. *"GitHub rejected the request (401/403)"* means the token is invalid or lacks access to the repository. Also try a bigger Lookback: only PRs updated in that window are imported |

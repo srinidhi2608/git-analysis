@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, ensure_database_schema, get_db
@@ -26,7 +27,7 @@ from app.queries import (
     get_all_developers,
 )
 from app.ingest import run_ingestion, sync_developer_teams
-from app.models import PullRequest
+from app.models import AzurePipelineRun, AzureWorkItem, Developer, PullRequest
 from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_snapshot
 from app.teams import load_team_config
 from app.devops_config import load_devops_config
@@ -37,12 +38,12 @@ from app.devops_metrics import (
     list_people,
     list_tags,
     markdown_report,
+    unlinked_azure_identities,
     people_efficiency,
     query_stories,
     stories_csv,
     summarize_stories,
 )
-from app.models import AzurePipelineRun, AzureWorkItem
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -84,6 +85,8 @@ class DeveloperMetricsResponse(BaseModel):
 
 class PrCycleByDeveloperItem(BaseModel):
     developer: str
+    # Display name from config.yaml teams (the GitHub login if not configured).
+    label: str | None = None
     cycleTimeHours: float
 
 
@@ -95,11 +98,23 @@ class PrsPerWeekItem(BaseModel):
 class DeveloperItem(BaseModel):
     github_username: str
     team_name: str | None
+    # Display name from config.yaml teams (the GitHub login if not configured).
+    display_name: str | None = None
+
+
+class TeamMemberItem(BaseModel):
+    key: str
+    display_name: str
+    github: str | None
+    azure_devops: list[str]
+    role: str | None
 
 
 class TeamItem(BaseModel):
     name: str
+    # Member keys (GitHub login, or display name for members without GitHub).
     members: list[str]
+    people: list[TeamMemberItem] = []
 
 
 class TeamsResponse(BaseModel):
@@ -374,8 +389,50 @@ def list_teams():
     team_config = load_team_config()
     return TeamsResponse(
         enabled=team_config.enabled,
-        teams=[TeamItem(name=name, members=members) for name, members in team_config.teams.items()],
+        teams=[
+            TeamItem(
+                name=name,
+                members=members,
+                people=[TeamMemberItem(**member) for member in team_config.members() if member["team"] == name],
+            )
+            for name, members in team_config.teams.items()
+        ],
     )
+
+
+@app.get("/api/people")
+def people_mapping(db: Session = Depends(get_db)):
+    """Each configured person's GitHub and Azure DevOps identities and how much stored data matched them.
+
+    Also lists Azure DevOps identities in the stored data that match nobody, to
+    help fill in ``azure_devops`` in config.yaml.
+    """
+    team_config = load_team_config()
+    pr_counts = dict(
+        db.query(Developer.github_username, func.count(PullRequest.id))
+        .join(PullRequest, PullRequest.developer_id == Developer.id)
+        .group_by(Developer.github_username)
+        .all()
+    )
+    pr_counts = {login.lower(): count for login, count in pr_counts.items()}
+    work_items: dict[str, int] = {}
+    for email, name in db.query(AzureWorkItem.assigned_to_email, AzureWorkItem.assigned_to).all():
+        member = team_config.member_for_azure(email, name)
+        if member:
+            work_items[member.key] = work_items.get(member.key, 0) + 1
+    people = [
+        {
+            **member,
+            "pull_requests": pr_counts.get((member["github"] or "").lower(), 0),
+            "work_items": work_items.get(member["key"], 0),
+        }
+        for member in team_config.members()
+    ]
+    return {
+        "teams_enabled": team_config.enabled,
+        "people": people,
+        "unlinked_azure_identities": unlinked_azure_identities(db, team_config),
+    }
 
 
 @app.get("/active-repositories")
@@ -395,7 +452,11 @@ def team_dora_metrics(team: str | None = None, days: int = WindowDays, db: Sessi
 
 @app.get("/api/developers", response_model=list[DeveloperItem])
 def list_developers(team: str | None = None, db: Session = Depends(get_db)):
-    return get_all_developers(db, teams=_resolve_teams(team))
+    team_config = load_team_config()
+    return [
+        {**row, "display_name": team_config.display_name(row["github_username"])}
+        for row in get_all_developers(db, teams=_resolve_teams(team))
+    ]
 
 
 @app.get("/api/developers/{github_username}", response_model=DeveloperMetricsResponse)
@@ -455,7 +516,11 @@ def developer_dora_metrics(github_username: str, days: int = WindowDays, db: Ses
 
 @app.get("/api/chart/pr-cycle-by-developer", response_model=list[PrCycleByDeveloperItem])
 def chart_pr_cycle_by_developer(team: str | None = None, days: int = WindowDays, db: Session = Depends(get_db)):
-    return get_pr_cycle_time_by_developer(db, days=days, teams=_resolve_teams(team))
+    team_config = load_team_config()
+    return [
+        {**row, "label": team_config.display_name(row["developer"])}
+        for row in get_pr_cycle_time_by_developer(db, days=days, teams=_resolve_teams(team))
+    ]
 
 
 @app.get("/api/chart/prs-per-week", response_model=list[PrsPerWeekItem])
@@ -692,6 +757,7 @@ def devops_filter_options(db: Session = Depends(get_db)):
     return {
         "tags": list_tags(db),
         "people": list_people(db, team_config),
+        "unlinked_identities": unlinked_azure_identities(db, team_config),
         "types": types,
         "teams": team_config.team_names,
     }
@@ -757,6 +823,7 @@ def devops_report(
         people_efficiency(db, stories, filters, team_config),
         stories,
         dora,
+        person_label=team_config.display_name(filters.person) if filters.person else None,
     )
     return Response(
         report,

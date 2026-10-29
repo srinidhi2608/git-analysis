@@ -36,17 +36,47 @@ interface SyncRun {
   work_items?: number;
   pipeline_runs?: number;
   skipped_work_items?: number;
+  skipped_identities?: { identity: string; work_items: number }[];
   azure_requests?: number;
   snapshot?: string;
   error?: string;
   finished_at?: string;
 }
 
+interface UnlinkedIdentity {
+  identity: string;
+  display_name: string | null;
+  work_items: number;
+}
+
 interface FilterOptions {
   tags: { tag: string; count: number }[];
-  people: { key: string; label: string; role: string | null; team: string | null; azure: string | null }[];
+  people: {
+    key: string;
+    label: string;
+    role: string | null;
+    team: string | null;
+    github: string | null;
+    azure: string | null;
+  }[];
+  unlinked_identities: UnlinkedIdentity[];
   types: string[];
   teams: string[];
+}
+
+interface PeopleMapping {
+  teams_enabled: boolean;
+  people: {
+    key: string;
+    display_name: string;
+    team: string;
+    github: string | null;
+    azure_devops: string[];
+    role: string | null;
+    pull_requests: number;
+    work_items: number;
+  }[];
+  unlinked_azure_identities: UnlinkedIdentity[];
 }
 
 interface LinkedPr {
@@ -112,7 +142,7 @@ interface StoriesResponse {
 }
 
 interface DoraResponse {
-  scope: { person: string | null; team: string | null; kind: "all" | "team" | "person" };
+  scope: { person: string | null; person_label: string | null; team: string | null; kind: "all" | "team" | "person" };
   method: "pipeline" | "incidents";
   deployment_frequency: {
     deployments: number;
@@ -337,7 +367,14 @@ export default function DevOpsIntegrationPage() {
         setSyncMessage(
           `Synced ${run.work_items ?? 0} work item(s) and ${run.pipeline_runs ?? 0} pipeline run(s) ` +
             `with ${run.azure_requests ?? 0} Azure DevOps request(s)` +
-            (run.skipped_work_items ? `; skipped ${run.skipped_work_items} item(s) of people not in a team` : "") +
+            (run.skipped_work_items
+              ? `; skipped ${run.skipped_work_items} item(s) of people not in a team (` +
+                (run.skipped_identities ?? [])
+                  .slice(0, 5)
+                  .map((item) => item.identity)
+                  .join(", ") +
+                ") — link them under teams with azure_devops in config.yaml"
+              : "") +
             ".",
         );
       }
@@ -372,7 +409,8 @@ export default function DevOpsIntegrationPage() {
   const visibleTags = (options?.tags ?? []).filter(
     (t) => !tagSearch || t.tag.toLowerCase().includes(tagSearch.toLowerCase()),
   );
-  const scopeLabel = person ? person : team ? `Team ${team}` : "All teams";
+  const personLabel = options?.people.find((p) => p.key === person)?.label ?? person;
+  const scopeLabel = person ? personLabel : team ? `Team ${team}` : "All teams";
   const hasData = (config?.work_items ?? 0) + (config?.pipeline_runs ?? 0) > 0;
 
   return (
@@ -493,7 +531,7 @@ export default function DevOpsIntegrationPage() {
               {people.map((p) => (
                 <option key={p.key} value={p.key}>
                   {p.label}
-                  {p.role ? ` (${p.role})` : ""}
+                  {p.role ? ` · ${p.role}` : ""}
                 </option>
               ))}
             </select>
@@ -598,7 +636,117 @@ export default function DevOpsIntegrationPage() {
 
       <DoraSection dora={dora} loading={loading} scopeLabel={scopeLabel} />
       <StoriesSection data={stories} loading={loading} onSelectPerson={setPerson} />
+      <PeopleSection refreshKey={config?.work_items ?? 0} />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// People and identities (GitHub login <-> Azure DevOps identity)
+// ---------------------------------------------------------------------------
+
+function PeopleSection({ refreshKey }: { refreshKey: number }) {
+  const [mapping, setMapping] = useState<PeopleMapping | null>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getJson<PeopleMapping>("/api/people", controller.signal)
+      .then(setMapping)
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [refreshKey]);
+
+  if (!mapping) return null;
+  const unlinked = mapping.unlinked_azure_identities;
+  const snippet = unlinked
+    .slice(0, 5)
+    .map(
+      (item) =>
+        `    - name: "${item.display_name ?? item.identity}"\n      github: "<their GitHub login>"\n      azure_devops: "${item.identity}"\n      role: developer`,
+    )
+    .join("\n");
+
+  return (
+    <Card>
+      <button className="flex w-full items-center justify-between text-left" onClick={() => setOpen(!open)} type="button">
+        <div>
+          <h3 className="text-lg font-semibold text-white">People &amp; identities</h3>
+          <p className="mt-1 text-sm text-slate-400">
+            How each person's GitHub login and Azure DevOps identity are linked (config.yaml <code>teams</code>).
+            {unlinked.length > 0 && (
+              <span className="ml-1 text-amber-300">{unlinked.length} Azure DevOps identit{unlinked.length === 1 ? "y is" : "ies are"} not linked to anyone.</span>
+            )}
+          </p>
+        </div>
+        <span className="text-sm text-slate-400">{open ? "Hide ▲" : "Show ▼"}</span>
+      </button>
+
+      {open && (
+        <div className="mt-4 space-y-6">
+          {mapping.people.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              No teams are configured. Add people under <code>teams</code> in config.yaml to link their GitHub and Azure DevOps names.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs uppercase tracking-wide text-slate-400">
+                  <tr>
+                    <th className="py-2 pr-4">Name</th>
+                    <th className="py-2 pr-4">Team</th>
+                    <th className="py-2 pr-4">Role</th>
+                    <th className="py-2 pr-4">GitHub</th>
+                    <th className="py-2 pr-4">Azure DevOps</th>
+                    <th className="py-2 pr-4">PRs stored</th>
+                    <th className="py-2 pr-4">Work items stored</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800 text-slate-200">
+                  {mapping.people.map((person) => (
+                    <tr key={person.key}>
+                      <td className="py-2 pr-4 font-medium">{person.display_name}</td>
+                      <td className="py-2 pr-4 text-slate-400">{person.team}</td>
+                      <td className="py-2 pr-4 text-slate-400">{person.role ?? "—"}</td>
+                      <td className="py-2 pr-4">{person.github ?? <span className="text-slate-500">none</span>}</td>
+                      <td className="py-2 pr-4">
+                        {person.azure_devops.length > 0 ? (
+                          person.azure_devops.join(", ")
+                        ) : (
+                          <span className="text-slate-500" title="Matched by display name or GitHub login only">
+                            not set
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4">{person.pull_requests}</td>
+                      <td className={`py-2 pr-4 ${person.work_items === 0 ? "text-amber-300" : ""}`}>{person.work_items}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {unlinked.length > 0 && (
+            <div>
+              <h4 className="text-sm font-medium text-amber-300">Azure DevOps identities not linked to anyone</h4>
+              <p className="mt-1 text-sm text-slate-400">
+                Their work items show under the Azure name and are not counted for any GitHub user. Add them to a team in config.yaml, e.g.:
+              </p>
+              <ul className="mt-2 flex flex-wrap gap-2 text-xs">
+                {unlinked.slice(0, 30).map((item) => (
+                  <li className="rounded-full border border-slate-700 px-3 py-1 text-slate-300" key={item.identity}>
+                    {item.display_name && item.display_name !== item.identity ? `${item.display_name} <${item.identity}>` : item.identity}{" "}
+                    <span className="text-slate-500">{item.work_items}</span>
+                  </li>
+                ))}
+              </ul>
+              <pre className="mt-3 overflow-x-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-300">{`teams:\n  YourTeam:\n${snippet}`}</pre>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -655,7 +803,9 @@ function DoraSection({ dora, loading, scopeLabel }: { dora: DoraResponse | null;
       <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div>
           <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">DORA metrics · DevLake / DORA 2023 benchmarks</p>
-          <h3 className="mt-2 text-xl font-semibold text-white">Software delivery performance — {scopeLabel}</h3>
+          <h3 className="mt-2 text-xl font-semibold text-white">
+            Software delivery performance — {dora.scope.person_label ?? scopeLabel}
+          </h3>
           <p className="mt-1 text-sm text-slate-400">
             {dora.scope.kind === "all"
               ? "All production deployments in the date range."

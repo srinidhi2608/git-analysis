@@ -38,6 +38,8 @@ interface CommentCategoryItem {
 
 interface PrCycleItem {
   developer: string;
+  // Display name from config.yaml teams (falls back to the GitHub login).
+  label?: string | null;
   cycleTimeHours: number;
 }
 
@@ -49,6 +51,8 @@ interface PrsPerWeekItem {
 interface DeveloperItem {
   github_username: string;
   team_name: string | null;
+  // Display name from config.yaml teams (falls back to the GitHub login).
+  display_name?: string | null;
 }
 
 interface TeamItem {
@@ -534,7 +538,7 @@ function IndividualPerformancePanel({
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">Individual Performance</p>
-            <h2 className="mt-2 text-2xl font-semibold text-white">{analytics?.github_username || developerName || "Developer"}</h2>
+            <h2 className="mt-2 text-2xl font-semibold text-white">{developerName || analytics?.github_username || "Developer"}</h2>
             {analytics && (
               <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">{analytics.summary.overview}</p>
             )}
@@ -1308,8 +1312,10 @@ export default function GitAnalyticsDashboard() {
   const selectedDevPerf = developerAnalytics?.metrics.average_cycle_time_hours != null
     ? developerAnalytics.metrics.average_cycle_time_hours
     : cycleByDev.find((r) => r.developer === selectedDeveloper)?.cycleTimeHours;
+  const selectedDeveloperName =
+    developers.find((d) => d.github_username === selectedDeveloper)?.display_name || selectedDeveloper;
   const individualCards = [
-    { label: "Developer", value: selectedDeveloper || "—", loading: false },
+    { label: "Developer", value: selectedDeveloperName || "—", loading: false },
     {
       label: "Avg PR Cycle Time",
       value: selectedDevPerf != null ? `${selectedDevPerf.toFixed(1)}h` : "—",
@@ -1481,7 +1487,9 @@ export default function GitAnalyticsDashboard() {
                 >
                   {developers.map((d) => (
                     <option key={d.github_username} value={d.github_username}>
-                      {d.github_username}
+                      {d.display_name && d.display_name !== d.github_username
+                        ? `${d.display_name} (${d.github_username})`
+                        : d.github_username}
                     </option>
                   ))}
                 </select>
@@ -1530,7 +1538,7 @@ export default function GitAnalyticsDashboard() {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={cycleData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                    <XAxis dataKey="developer" stroke="#94a3b8" />
+                    <XAxis dataKey={(row: PrCycleItem) => row.label || row.developer} stroke="#94a3b8" />
                     <YAxis stroke="#94a3b8" />
                     <Tooltip />
                     <Legend />
@@ -1577,7 +1585,7 @@ export default function GitAnalyticsDashboard() {
 
         {!isTeamView && (
           <IndividualPerformancePanel
-            developerName={selectedDeveloper}
+            developerName={selectedDeveloperName}
             analytics={developerAnalytics}
             error={analyticsError}
             loading={indivAnalyticsLoading}

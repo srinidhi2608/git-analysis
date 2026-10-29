@@ -8,17 +8,24 @@ repositories:
 # and reported in the backend log after each sync. The dashboard's Team
 # Overview gets a team selector. Remove the section to ingest everyone.
 #
+# Each member is one person; GitHub and Azure DevOps names may differ:
+#
 # teams:
 #   GrowthTeam:
-#     - name: "CF-Vaishnavi"
-#     - name: "CF-SinchanaBhat"
+#     - name: "Vaishnavi K"                      # display name used on every page
+#       github: "CF-Vaishnavi"                   # GitHub login
+#       azure_devops: "vaishnavi.k@company.com"  # Azure DevOps identity (email or display name; list allowed)
+#       role: developer                          # developer | tester
+#     - name: "Tom QA"                           # tester without a GitHub account
+#       azure_devops: "tom.q@company.com"
+#       role: tester
 #   IppPayFac:
-#     - name: "CF-NewMember"
+#     - name: "CF-NewMember"                     # short form: name is the GitHub login
 
 # Optional: DevOps Integration page (Azure Boards + Azure Pipelines).
 # The access token goes in .env as AZURE_DEVOPS_PAT. See README "DevOps Integration".
-# Team members (above) can add `azure: <their Azure DevOps email>` and
-# `role: developer | tester` to link their Azure work items to their GitHub login.
+# Link people's Azure DevOps identities to their GitHub logins with `github:` and
+# `azure_devops:` on their team entries above.
 #
 # azure_devops:
 #   organization: "your-org"              # or "https://dev.azure.com/your-org"

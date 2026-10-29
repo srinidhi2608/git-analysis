@@ -5,15 +5,26 @@
 -- Dates are relative to now(), so the data always falls in the last ~6 weeks.
 -- Safe to re-run: rows are replaced.
 --
--- To map these Azure identities to the sample GitHub developers, add to
--- config.yaml (see README "DevOps Integration"):
+-- To link these Azure DevOps identities to the sample GitHub logins (the names
+-- differ, as they usually do), add to config.yaml (see README "DevOps Integration"):
 --   teams:
 --     Backend:
---       - { name: alice_dev, azure: alice@acme.dev, role: developer }
---       - { name: bob_dev,   azure: bob@acme.dev,   role: developer }
---       - { name: tom_qa,    azure: tom@acme.dev,   role: tester }
+--       - name: "Alice Anderson"        # shown on every page
+--         github: "alice_dev"           # GitHub login
+--         azure_devops: "alice@acme.dev"
+--         role: developer
+--       - name: "Bob Brown"
+--         github: "bob_dev"
+--         azure_devops: "bob@acme.dev"
+--         role: developer
+--       - name: "Tom QA"                # tester without a GitHub account
+--         azure_devops: "tom@acme.dev"
+--         role: tester
 --     Frontend:
---       - { name: carol_dev, azure: carol@acme.dev, role: developer }
+--       - name: "Carol Chen"
+--         github: "carol_dev"
+--         azure_devops: "carol@acme.dev"
+--         role: developer
 -- =============================================================================
 
 DELETE FROM azure_work_item_tags WHERE work_item_id BETWEEN 1000 AND 1999;

@@ -16,6 +16,8 @@ from app.devops_ingest import parse_azure_datetime, run_devops_ingestion, upsert
 from app.devops_metrics import (
     StoryFilters,
     compute_dora,
+    list_people,
+    unlinked_azure_identities,
     markdown_report,
     people_efficiency,
     query_stories,
@@ -379,6 +381,84 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(sorted(t.tag for t in item.tags), ["a", "b"])
         self.assertEqual(item.closed_date, T0)
         self.assertEqual(target.query(AzurePipelineRun).one().source_version, "abc")
+
+
+
+IDENTITIES = parse_team_config(
+    {
+        "teams": {
+            "Growth": [
+                {"name": "Vaishnavi K", "github": "CF-Vaishnavi", "azure_devops": "vaishnavi.k@company.com", "role": "developer"},
+                {"name": "Tom QA", "azure_devops": ["tom.q@company.com", "Tom Quinn"], "role": "tester"},
+                {"name": "Sinchana Bhat", "github": "CF-SinchanaBhat"},  # matched by Azure display name
+            ],
+            "Legacy": ["plain-login", {"name": "old-style", "azure": "old@company.com"}],
+        }
+    }
+)
+
+
+class IdentityMappingTests(unittest.TestCase):
+    def test_members_have_display_name_github_and_azure_identities(self):
+        vaishnavi = IDENTITIES.member("cf-vaishnavi")
+        self.assertEqual((vaishnavi.key, vaishnavi.display_name, vaishnavi.github), ("CF-Vaishnavi", "Vaishnavi K", "CF-Vaishnavi"))
+        self.assertEqual(IDENTITIES.display_name("CF-Vaishnavi"), "Vaishnavi K")
+        self.assertEqual(IDENTITIES.display_name("not-configured"), "not-configured")
+        # A tester without GitHub: keyed by display name, never matches GitHub data.
+        tom = IDENTITIES.member("Tom QA")
+        self.assertIsNone(tom.github)
+        self.assertFalse(IDENTITIES.is_member("Tom QA"))
+        self.assertTrue(IDENTITIES.is_member("cf-vaishnavi"))
+        # Legacy formats: name is the GitHub login, `azure` alias still works.
+        self.assertTrue(IDENTITIES.is_member("plain-login"))
+        self.assertEqual(IDENTITIES.login_for_azure("OLD@company.com"), "old-style")
+        self.assertEqual(
+            [m["key"] for m in IDENTITIES.members()],
+            ["CF-Vaishnavi", "Tom QA", "CF-SinchanaBhat", "plain-login", "old-style"],
+        )
+
+    def test_azure_identities_resolve_to_the_same_person(self):
+        self.assertEqual(IDENTITIES.member_for_azure("vaishnavi.k@company.com").key, "CF-Vaishnavi")
+        self.assertEqual(IDENTITIES.member_for_azure(None, "Tom Quinn").key, "Tom QA")
+        self.assertEqual(IDENTITIES.member_for_azure("unknown@company.com", "Sinchana Bhat").key, "CF-SinchanaBhat")
+        self.assertIsNone(IDENTITIES.member_for_azure("stranger@company.com", "Stranger"))
+
+    def test_same_azure_identity_for_two_people_keeps_the_first(self):
+        with self.assertLogs("app.teams", level="WARNING"):
+            config = parse_team_config(
+                {"teams": {"A": [{"name": "One", "github": "one", "azure_devops": "x@c.com"}, {"name": "Two", "github": "two", "azure_devops": "X@c.com"}]}}
+            )
+        self.assertEqual(config.login_for_azure("x@c.com"), "one")
+
+    def test_pages_use_display_names_and_report_unlinked_identities(self):
+        db = _session()
+        _work_item(db, 1, assigned="vaishnavi.k@company.com", closed=T0, points=3)
+        _work_item(db, 2, assigned="tom.q@company.com", closed=T0)
+        _work_item(db, 3, assigned="stranger@company.com", closed=T0)
+        _work_item(db, 4, assigned=None, created_by="tom.q@company.com", item_type="Bug", created=T0)
+        _pr(db, 1, "CF-Vaishnavi", T0)
+        db.commit()
+        filters = StoryFilters(date_from=DAY, date_to=DAY + timedelta(days=6))
+
+        stories = query_stories(db, filters, IDENTITIES)
+        self.assertEqual(sorted(s["assignee"] for s in stories), ["Tom QA", "Vaishnavi K"])
+        efficiency = {row["person"]: row for row in people_efficiency(db, stories, filters, IDENTITIES)}
+        self.assertEqual(efficiency["Vaishnavi K"]["prs_merged"], 1)
+        self.assertEqual(efficiency["Vaishnavi K"]["github"], "CF-Vaishnavi")
+        self.assertEqual(efficiency["Tom QA"]["bugs_reported"], 1)
+        self.assertIsNone(efficiency["Tom QA"]["github"])
+
+        # Filtering by a person uses their key; their GitHub PRs feed person-level DORA.
+        self.assertEqual([s["id"] for s in query_stories(db, StoryFilters(date_from=DAY, date_to=DAY + timedelta(days=6), person="CF-Vaishnavi"), IDENTITIES)], [1])
+        self.assertEqual([s["id"] for s in query_stories(db, StoryFilters(date_from=DAY, date_to=DAY + timedelta(days=6), person="Tom QA"), IDENTITIES)], [2])
+        dora = compute_dora(db, CONFIG, IDENTITIES, DAY, DAY + timedelta(days=6), person="CF-Vaishnavi")
+        self.assertEqual(dora["scope"]["person_label"], "Vaishnavi K")
+
+        people = {p["key"]: p for p in list_people(db, IDENTITIES)}
+        self.assertEqual(people["CF-Vaishnavi"]["label"], "Vaishnavi K")
+        self.assertEqual(people["Tom QA"]["azure"], "tom.q@company.com, Tom Quinn")
+        unlinked = unlinked_azure_identities(db, IDENTITIES)
+        self.assertEqual([u["identity"] for u in unlinked], ["stranger@company.com"])
 
 
 if __name__ == "__main__":

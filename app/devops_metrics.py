@@ -149,25 +149,40 @@ class Person:
 
 
 def resolve_person(team_config: TeamConfig, email: str | None, name: str | None) -> Person | None:
-    """Identify the person behind an Azure identity, preferring the configured GitHub login."""
-    login = team_config.login_for_azure(email, name)
-    if login:
-        return Person(login, login, team_config.role_for(login), team_config.team_for(login), login)
+    """Identify the person behind an Azure DevOps identity.
+
+    Configured members (matched through ``azure_devops`` identities, display name
+    or GitHub login) get their display name; anyone else keeps their Azure name.
+    """
+    member = team_config.member_for_azure(email, name)
+    if member:
+        return Person(member.key, member.display_name, member.role, member.team, member.github)
     if not (email or name):
         return None
     return Person((email or name or "").lower(), name or email or "", None, None, None)
+
+
+def github_login_for(team_config: TeamConfig, person_key: str | None) -> str | None:
+    """GitHub login of a person key (member key or a raw login)."""
+    if not person_key:
+        return None
+    member = team_config.member(person_key)
+    if member is not None:
+        return member.github
+    return person_key
 
 
 def list_people(db: Session, team_config: TeamConfig) -> list[dict[str, Any]]:
     """Configured team members plus anyone assigned work items, for the person filter."""
     people: dict[str, dict[str, Any]] = {}
     for member in team_config.members():
-        people[member["login"].lower()] = {
-            "key": member["login"],
-            "label": member["login"],
+        people[member["key"].lower()] = {
+            "key": member["key"],
+            "label": member["display_name"],
             "role": member["role"],
             "team": member["team"],
-            "azure": member["azure"],
+            "github": member["github"],
+            "azure": ", ".join(member["azure_devops"]) or None,
         }
     rows = db.query(AzureWorkItem.assigned_to_email, AzureWorkItem.assigned_to).distinct().all()
     for email, name in rows:
@@ -178,9 +193,27 @@ def list_people(db: Session, team_config: TeamConfig) -> list[dict[str, Any]]:
                 "label": person.label,
                 "role": person.role,
                 "team": person.team,
-                "azure": email,
+                "github": person.login,
+                "azure": email or name,
             }
     return sorted(people.values(), key=lambda item: item["label"].lower())
+
+
+def unlinked_azure_identities(db: Session, team_config: TeamConfig) -> list[dict[str, Any]]:
+    """Azure DevOps assignees/creators in the stored data that match no configured member."""
+    counts: Counter[tuple[str | None, str | None]] = Counter()
+    for email, name in db.query(AzureWorkItem.assigned_to_email, AzureWorkItem.assigned_to).all():
+        counts[(email, name)] += 1
+    for email, name in db.query(AzureWorkItem.created_by_email, AzureWorkItem.created_by).all():
+        counts[(email, name)] += 1
+    result: dict[str, dict[str, Any]] = {}
+    for (email, name), count in counts.items():
+        if not (email or name) or team_config.member_for_azure(email, name):
+            continue
+        key = (email or name or "").lower()
+        entry = result.setdefault(key, {"identity": email or name, "display_name": name, "work_items": 0})
+        entry["work_items"] += count
+    return sorted(result.values(), key=lambda item: -item["work_items"])
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +413,9 @@ def people_efficiency(
     )
     merged_by_login = Counter(login.lower() for (login,) in merged)
     for row in rows.values():
-        row["prs_merged"] = merged_by_login.get(row["person_key"].lower(), 0)
+        login = github_login_for(team_config, row["person_key"])
+        row["github"] = login
+        row["prs_merged"] = merged_by_login.get(login.lower(), 0) if login else 0
 
     total_completed = sum(row["completed"] for row in rows.values()) or 1
     result = []
@@ -501,7 +536,8 @@ def compute_dora(
     )
     prs = pr_query.all()
     if person:
-        prs = [row for row in prs if row[2].lower() == person.lower()]
+        login = (github_login_for(team_config, person) or "").lower()
+        prs = [row for row in prs if row[2].lower() == login]
     elif team:
         prs = [row for row in prs if team_config.team_for(row[2]) == team]
     first_commits = _first_commit_times(db, [pr.id for pr, _, _ in prs])
@@ -607,7 +643,12 @@ def compute_dora(
         )
 
     return {
-        "scope": {"person": person, "team": team, "kind": "person" if person else "team" if team else "all"},
+        "scope": {
+            "person": person,
+            "person_label": team_config.display_name(person) if person else None,
+            "team": team,
+            "kind": "person" if person else "team" if team else "all",
+        },
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
         "method": method,
@@ -696,6 +737,7 @@ def markdown_report(
     efficiency: list[dict[str, Any]],
     stories: list[dict[str, Any]],
     dora: dict[str, Any] | None,
+    person_label: str | None = None,
 ) -> str:
     applied = [f"**Date range:** {filters.date_from} to {filters.date_to} ({filters.status} items)"]
     if filters.tags:
@@ -705,7 +747,7 @@ def markdown_report(
     if filters.team:
         applied.append(f"**Team:** {filters.team}")
     if filters.person:
-        applied.append(f"**Person:** {filters.person}")
+        applied.append(f"**Person:** {person_label or filters.person}")
 
     lines = [
         "# DevOps Integration report",
