@@ -4,3 +4,8 @@ __pycache__/
 .venv/
 snapshots/*
 !snapshots/.gitkeep
+# Certificates and keys are never committed (see certs/README.md)
+certs/**
+!certs/README.md
+!certs/*/
+!certs/**/.gitkeep

@@ -10,6 +10,13 @@ def _utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def in_branches(branches: list[str] | None):
+    """Filter clause restricting PRs to target (base) ``branches`` (``None``/empty: no restriction)."""
+    if not branches:
+        return true()
+    return PullRequest.base_branch.in_(branches)
+
+
 def _in_teams(teams: list[str] | None):
     """Filter clause restricting developers to ``teams`` (``None`` means no restriction)."""
     if teams is None:
@@ -31,7 +38,12 @@ def get_pull_request_counts_by_user_story(db: Session):
     return db.execute(stmt).all()
 
 
-def get_team_performance_metrics(db: Session, days: int = 30, teams: list[str] | None = None):
+def get_team_performance_metrics(
+    db: Session,
+    days: int = 30,
+    teams: list[str] | None = None,
+    branches: list[str] | None = None,
+):
     """Return team-level metrics for pull requests created or merged in the last N days."""
     since = _utc_now_naive() - timedelta(days=days)
     team_name = func.coalesce(Developer.team_name, "Unassigned").label("team_name")
@@ -43,7 +55,11 @@ def get_team_performance_metrics(db: Session, days: int = 30, teams: list[str] |
             func.count(PullRequest.id).label("total_prs"),
         )
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .where(or_(PullRequest.created_at >= since, PullRequest.merged_at >= since), _in_teams(teams))
+        .where(
+            or_(PullRequest.created_at >= since, PullRequest.merged_at >= since),
+            _in_teams(teams),
+            in_branches(branches),
+        )
         .group_by(team_name)
         .subquery()
     )
@@ -56,7 +72,11 @@ def get_team_performance_metrics(db: Session, days: int = 30, teams: list[str] |
         .select_from(Commit)
         .join(PullRequest, Commit.pr_id == PullRequest.id)
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .where(or_(PullRequest.created_at >= since, PullRequest.merged_at >= since), _in_teams(teams))
+        .where(
+            or_(PullRequest.created_at >= since, PullRequest.merged_at >= since),
+            _in_teams(teams),
+            in_branches(branches),
+        )
         .group_by(team_name)
         .subquery()
     )
@@ -139,7 +159,12 @@ def get_all_developers(db: Session, teams: list[str] | None = None):
     return db.execute(stmt).mappings().all()
 
 
-def get_pr_cycle_time_by_developer(db: Session, days: int = 30, teams: list[str] | None = None):
+def get_pr_cycle_time_by_developer(
+    db: Session,
+    days: int = 30,
+    teams: list[str] | None = None,
+    branches: list[str] | None = None,
+):
     """Return average PR cycle time (hours) per developer for PRs merged in the last N days."""
     since = _utc_now_naive() - timedelta(days=days)
     stmt = (
@@ -150,7 +175,7 @@ def get_pr_cycle_time_by_developer(db: Session, days: int = 30, teams: list[str]
         .join(Developer, PullRequest.developer_id == Developer.id)
         .where(PullRequest.merged_at >= since)
         .where(PullRequest.cycle_time_minutes.is_not(None))
-        .where(_in_teams(teams))
+        .where(_in_teams(teams), in_branches(branches))
         .group_by(Developer.github_username)
         .order_by(Developer.github_username)
     )
@@ -166,6 +191,7 @@ def get_prs_per_week(
     developer: str | None = None,
     days: int = 42,
     teams: list[str] | None = None,
+    branches: list[str] | None = None,
 ):
     """Return merged PR count per ISO week label for PRs merged in the last N days."""
     since = _utc_now_naive() - timedelta(days=days)
@@ -177,6 +203,7 @@ def get_prs_per_week(
             PullRequest.merged_at >= since,
             PullRequest.merged_at.is_not(None),
             _in_teams(teams),
+            in_branches(branches),
         )
     )
 
@@ -200,3 +227,27 @@ def get_prs_per_week(
     sorted_weeks = sorted(week_counts.items())
     return [{"week": w, "mergedPrs": c} for w, c in sorted_weeks]
 
+
+def get_target_branches(db: Session, days: int | None = None, teams: list[str] | None = None) -> dict:
+    """Target (base) branches of stored PRs with PR counts, most used first.
+
+    ``unknown`` counts PRs synced before the base branch was recorded (a GitHub
+    sync with "Full refresh" fills it in).
+    """
+    stmt = (
+        select(PullRequest.base_branch, func.count(PullRequest.id))
+        .join(Developer, PullRequest.developer_id == Developer.id)
+        .where(_in_teams(teams))
+        .group_by(PullRequest.base_branch)
+    )
+    if days:
+        since = _utc_now_naive() - timedelta(days=days)
+        stmt = stmt.where(or_(PullRequest.created_at >= since, PullRequest.merged_at >= since))
+    branches, unknown = [], 0
+    for branch, count in db.execute(stmt).all():
+        if branch is None:
+            unknown += count
+        else:
+            branches.append({"name": branch, "pull_requests": count})
+    branches.sort(key=lambda item: (-item["pull_requests"], item["name"]))
+    return {"branches": branches, "unknown": unknown}

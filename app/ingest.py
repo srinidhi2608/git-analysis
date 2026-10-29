@@ -245,6 +245,7 @@ def run_ingestion(
                     last_review_comment_at=last_review_comment_at,
                     github_updated_at=github_updated_at,
                     merge_commit_sha=pr_data.get("merge_commit_sha"),
+                    base_branch=pr_data.get("base_branch"),
                 )
                 db.add(pull_request)
                 db.flush()
@@ -269,6 +270,7 @@ def run_ingestion(
                 existing.last_review_comment_at = last_review_comment_at
                 existing.github_updated_at = github_updated_at
                 existing.merge_commit_sha = pr_data.get("merge_commit_sha") or existing.merge_commit_sha
+                existing.base_branch = pr_data.get("base_branch") or existing.base_branch
 
             for commit_data in pr_data.get("commits", []):
                 _upsert_commit(db, pull_request, dev, commit_data)

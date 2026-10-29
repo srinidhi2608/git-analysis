@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import BranchSelect, { type BranchOption } from "./BranchSelect";
 import {
   Bar,
   CartesianGrid,
@@ -252,7 +253,17 @@ const inputClass =
 // Page
 // ---------------------------------------------------------------------------
 
-export default function DevOpsIntegrationPage() {
+export default function DevOpsIntegrationPage({
+  branchOptions,
+  selectedBranches,
+  onBranchesChange,
+  unknownBranchPrs,
+}: {
+  branchOptions: BranchOption[];
+  selectedBranches: string[];
+  onBranchesChange: (branches: string[]) => void;
+  unknownBranchPrs: number;
+}) {
   const [config, setConfig] = useState<DevOpsConfig | null>(null);
   const [options, setOptions] = useState<FilterOptions | null>(null);
   const [pageError, setPageError] = useState("");
@@ -307,8 +318,9 @@ export default function DevOpsIntegrationPage() {
     types.forEach((type) => params.append("types", type));
     if (team) params.set("team", team);
     if (person) params.set("person", person);
+    selectedBranches.forEach((branch) => params.append("branches", branch));
     return params.toString();
-  }, [dateFrom, dateTo, tagMode, status, tags, types, team, person]);
+  }, [dateFrom, dateTo, tagMode, status, tags, types, team, person, selectedBranches]);
 
   const loadData = useCallback(async () => {
     abortRef.current?.abort();
@@ -543,6 +555,15 @@ export default function DevOpsIntegrationPage() {
               <option value="all">Finished + open in range</option>
             </select>
           </label>
+          <div className="flex flex-col gap-1 text-xs text-slate-400">
+            PR target branch (DORA lead time)
+            <BranchSelect
+              onChange={onBranchesChange}
+              options={branchOptions}
+              selected={selectedBranches}
+              unknown={unknownBranchPrs}
+            />
+          </div>
           <button className="rounded-lg px-3 py-2 text-xs text-slate-400 hover:text-white" onClick={clearFilters} type="button">
             Clear filters
           </button>

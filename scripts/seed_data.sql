@@ -219,3 +219,14 @@ BEGIN
     FROM pull_requests p
    WHERE pc.pr_id = p.id AND p.repo_id = seed_repo_id;
 END $$;
+
+-- ─── Target (base) branches of the sample PRs ────────────────────────────────
+-- Lets the dashboard's "Target branch" filter be tried with the demo data.
+UPDATE pull_requests pr
+SET base_branch = CASE
+    WHEN pr.pr_number IN (7, 8) THEN 'develop'
+    WHEN pr.pr_number IN (9, 10) THEN 'release/2026.10'
+    ELSE 'main'
+  END
+FROM repositories r
+WHERE pr.repo_id = r.id AND r.name = 'acme-corp/platform' AND pr.base_branch IS NULL;

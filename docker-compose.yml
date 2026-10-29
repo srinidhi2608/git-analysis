@@ -43,6 +43,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
+      # HTTP, or HTTPS when certs/tls/server.crt + server.key exist.
       - "${APP_PORT:-8000}:8000"
     # Everything in .env (GITHUB_TOKEN, AI settings, metric thresholds) is passed
     # through; the entries under `environment` below take precedence.
@@ -69,6 +70,21 @@ services:
       # `docker compose down -v` and rebuilds; the newest one is loaded at
       # startup when the database is empty.
       - ./snapshots:/app/snapshots
+      # TLS certificate/key and extra trusted CAs (see certs/README.md). Mounted
+      # read-only over the copy baked into the image, so a restart picks up
+      # rotated certificates.
+      - ./certs:/app/certs:ro
+    # Hardening: no privilege escalation, and only the capabilities the
+    # entrypoint needs (fix ownership, then drop from root to appuser).
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   # ─── Optional: local Ollama LLM ─────────────────────────────────────────────
   # docker compose --profile ollama up --build

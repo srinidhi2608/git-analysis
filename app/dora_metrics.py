@@ -9,6 +9,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import Developer, PullRequest
+from app.queries import in_branches
 
 
 def _utc_now_naive() -> datetime:
@@ -208,12 +209,13 @@ def get_team_dora_metrics(
     db: Session,
     window_days: int = 30,
     teams: list[str] | None = None,
+    branches: list[str] | None = None,
 ) -> dict[str, Any]:
     since = _window_start(window_days)
     query = (
         db.query(PullRequest)
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .filter(_active_in_window(since))
+        .filter(_active_in_window(since), in_branches(branches))
     )
     if teams is not None:
         query = query.filter(Developer.team_name.in_(teams))
@@ -225,6 +227,7 @@ def get_developer_dora_metrics(
     db: Session,
     github_username: str,
     window_days: int = 30,
+    branches: list[str] | None = None,
 ) -> dict[str, Any] | None:
     developer = db.query(Developer).filter(Developer.github_username == github_username).one_or_none()
     if developer is None:
@@ -233,7 +236,7 @@ def get_developer_dora_metrics(
     since = _window_start(window_days)
     prs = (
         db.query(PullRequest)
-        .filter(PullRequest.developer_id == developer.id, _active_in_window(since))
+        .filter(PullRequest.developer_id == developer.id, _active_in_window(since), in_branches(branches))
         .order_by(PullRequest.created_at.desc())
         .all()
     )

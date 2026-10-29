@@ -12,7 +12,19 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import BranchSelect, { type BranchOption } from "./BranchSelect";
 import DevOpsIntegrationPage from "./DevOpsIntegrationPage";
+
+const BRANCH_STORAGE_KEY = "git-analysis.target-branches";
+
+function readStoredBranches(): string[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(BRANCH_STORAGE_KEY) ?? "[]");
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 type TabKey = "team" | "individual" | "devops";
 type IndivTabKey = "summary" | "dora" | "ai_metrics" | "reviewers";
@@ -959,6 +971,11 @@ export default function GitAnalyticsDashboard() {
   const [loadedDeveloper, setLoadedDeveloper] = useState<string | null>(null);
   // "" = all configured teams
   const [selectedTeam, setSelectedTeam] = useState<string>("");
+  // PR target (base) branches to include; empty = all branches. Remembered per browser.
+  const [selectedBranches, setSelectedBranches] = useState<string[]>(readStoredBranches);
+  const [branchOptions, setBranchOptions] = useState<BranchOption[]>([]);
+  const [unknownBranchPrs, setUnknownBranchPrs] = useState(0);
+  const branchParams = selectedBranches.map((branch) => `branches=${encodeURIComponent(branch)}`).join("&");
   const [teams, setTeams] = useState<TeamItem[]>([]);
   const [lookbackDays, setLookbackDays] = useState<number>(7);
   // Lookback applied to the dashboard; follows `lookbackDays` after typing pauses.
@@ -1039,6 +1056,7 @@ export default function GitAnalyticsDashboard() {
     setTeamDoraError("");
     try {
       const params = new URLSearchParams({ days: String(windowDays) });
+      selectedBranches.forEach((branch) => params.append("branches", branch));
       if (selectedTeam) params.set("team", selectedTeam);
       const teamQuery = `?${params}`;
       const [perf, cycle, prsWeek, devs, dora, thresh, teamList] = await Promise.all([
@@ -1050,6 +1068,12 @@ export default function GitAnalyticsDashboard() {
         apiFetch<Thresholds>("/api/config/thresholds", signal),
         apiFetch<TeamsResponse>("/api/teams", signal),
       ]);
+      const branchList = await apiFetch<{ branches: BranchOption[]; unknown: number }>(
+        `/api/branches?days=${windowDays}${selectedTeam ? `&team=${encodeURIComponent(selectedTeam)}` : ""}`,
+        signal,
+      );
+      setBranchOptions(branchList.branches);
+      setUnknownBranchPrs(branchList.unknown);
       setTeams(teamList.teams);
       setTeamPerf(perf);
       setCycleByDev(cycle);
@@ -1071,7 +1095,7 @@ export default function GitAnalyticsDashboard() {
     } finally {
       if (teamAbortRef.current === controller) setTeamLoading(false);
     }
-  }, [selectedDeveloper, selectedTeam, windowDays]);
+  }, [selectedDeveloper, selectedTeam, windowDays, selectedBranches]);
 
   /** Charts and DORA: quick database queries that depend on the lookback window. */
   const loadIndividualQuick = useCallback(
@@ -1092,11 +1116,12 @@ export default function GitAnalyticsDashboard() {
       }
       setIndivLoading(true);
       const encoded = encodeURIComponent(dev);
+      const branchSuffix = branchParams ? `&${branchParams}` : "";
       try {
         const [prsWeek, cycleTime, dora] = await Promise.all([
-          apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week?developer=${encoded}&days=${windowDays}`, signal),
-          apiFetch<PrCycleItem[]>(`/api/chart/pr-cycle-by-developer?days=${windowDays}`, signal),
-          apiFetch<DeveloperDoraMetricsResponse>(`/api/developers/${encoded}/dora?days=${windowDays}`, signal),
+          apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week?developer=${encoded}&days=${windowDays}${branchSuffix}`, signal),
+          apiFetch<PrCycleItem[]>(`/api/chart/pr-cycle-by-developer?days=${windowDays}${branchSuffix}`, signal),
+          apiFetch<DeveloperDoraMetricsResponse>(`/api/developers/${encoded}/dora?days=${windowDays}${branchSuffix}`, signal),
         ]);
         if (!isCurrent()) return;
         setIndivPrsPerWeek(prsWeek);
@@ -1109,7 +1134,7 @@ export default function GitAnalyticsDashboard() {
         if (isCurrent()) setIndivLoading(false);
       }
     },
-    [windowDays],
+    [windowDays, branchParams],
   );
 
   /** AI review analytics (may call an LLM); independent of the lookback window. */
@@ -1129,7 +1154,7 @@ export default function GitAnalyticsDashboard() {
     setAnalyticsLoading(true);
     try {
       const result = await apiFetch<DeveloperAnalyticsResponse>(
-        `/api/developers/${encodeURIComponent(dev)}/analytics`,
+        `/api/developers/${encodeURIComponent(dev)}/analytics${branchParams ? `?${branchParams}` : ""}`,
         signal,
       );
       if (isCurrent()) setDeveloperAnalytics(result);
@@ -1139,7 +1164,7 @@ export default function GitAnalyticsDashboard() {
     } finally {
       if (isCurrent()) setAnalyticsLoading(false);
     }
-  }, []);
+  }, [branchParams]);
 
   /** Loads everything for ``dev``; a new call cancels the previous developer's requests. */
   const loadIndividualData = useCallback(
@@ -1178,11 +1203,23 @@ export default function GitAnalyticsDashboard() {
     [activeTab, loadTeamData, loadIndividualData, loadIndividualQuick, selectedDeveloper],
   );
 
-  // Initial load, and reload whenever the selected team or lookback window changes.
+  // Initial load, and reload whenever the selected team, lookback window or target branches change.
   useEffect(() => {
     refreshData(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTeam, windowDays]);
+  }, [selectedTeam, windowDays, branchParams]);
+
+  // The developer analytics depend on the target branches too: reload them on the
+  // Individual tab, or the next time it is opened.
+  const handleBranchesChange = (branches: string[]) => {
+    setSelectedBranches(branches);
+    setLoadedDeveloper(null);
+    try {
+      localStorage.setItem(BRANCH_STORAGE_KEY, JSON.stringify(branches));
+    } catch {
+      /* storage unavailable: the selection just isn't remembered */
+    }
+  };
 
   useEffect(() => {
     loadSnapshots();
@@ -1449,11 +1486,22 @@ export default function GitAnalyticsDashboard() {
         </div>
 
         {activeTab === "devops" ? (
-          <DevOpsIntegrationPage />
+          <DevOpsIntegrationPage
+            branchOptions={branchOptions}
+            onBranchesChange={handleBranchesChange}
+            selectedBranches={selectedBranches}
+            unknownBranchPrs={unknownBranchPrs}
+          />
         ) : (
           <>
-        {(teams.length > 0 || (!isTeamView && developers.length > 0)) && (
+        {(teams.length > 0 || branchOptions.length > 0 || selectedBranches.length > 0 || (!isTeamView && developers.length > 0)) && (
           <div className="flex flex-wrap items-center gap-3">
+            <BranchSelect
+              onChange={handleBranchesChange}
+              options={branchOptions}
+              selected={selectedBranches}
+              unknown={unknownBranchPrs}
+            />
             {teams.length > 0 && (
               <>
                 <label className="text-sm text-slate-400" htmlFor="team-select">

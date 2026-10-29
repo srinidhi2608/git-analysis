@@ -1,0 +1,38 @@
+# =============================================================================
+# docker-compose.prod.yml — production overrides
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# - HTTPS is required: the app refuses to start without certs/tls/server.crt
+#   and certs/tls/server.key, and listens on ${APP_PORT:-443}.
+# - PostgreSQL is not published on the host.
+# - API docs off, CORS limited to ${CORS_ALLOW_ORIGINS}, resource limits.
+# Requires Docker Compose 2.24+ (for `!reset`).
+# =============================================================================
+
+services:
+  db:
+    ports: !reset []
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  app:
+    restart: always
+    ports: !override
+      - "${APP_PORT:-443}:8000"
+    environment:
+      REQUIRE_TLS: "true"
+      ENABLE_API_DOCS: "${ENABLE_API_DOCS:-false}"
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      # Behind a reverse proxy / load balancer, list its IPs so X-Forwarded-*
+      # headers (client IP, https) are trusted.
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
+    deploy:
+      resources:
+        limits:
+          memory: 1g

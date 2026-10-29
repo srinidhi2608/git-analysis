@@ -22,11 +22,12 @@ It pulls PRs, reviews, review comments and commits for the repositories you choo
 5. [Running the API and UI separately (without Docker)](#5-running-the-api-and-ui-separately-without-docker)
 6. [AI analysis (optional)](#6-ai-analysis-optional)
 7. [DevOps Integration (Azure DevOps)](#7-devops-integration-azure-devops)
-8. [API reference](#8-api-reference)
-9. [What the metrics mean](#9-what-the-metrics-mean)
-10. [Project layout](#10-project-layout)
-11. [Running the tests](#11-running-the-tests)
-12. [Troubleshooting](#12-troubleshooting)
+8. [Production deployment (HTTPS, certificates, hardening)](#8-production-deployment-https-certificates-hardening)
+9. [API reference](#9-api-reference)
+10. [What the metrics mean](#10-what-the-metrics-mean)
+11. [Project layout](#11-project-layout)
+12. [Running the tests](#12-running-the-tests)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
@@ -299,6 +300,20 @@ To start completely fresh, delete the files in `./snapshots/` as well as running
 
 ---
 
+### 4.5 Filter by target branch
+
+PRs are often merged into several branches (`main`, `develop`, `release/*`, hotfix branches). The **Target branch** dropdown, above the cards on Team Overview and Individual Performance and in the DevOps Integration filters, limits every PR-based number to PRs that **target** the selected branches:
+
+- Pick one or several branches; the list shows how many PRs target each.
+- **All branches** clears the filter.
+- The selection is remembered in your browser.
+
+It applies to the cards, DORA metrics, charts, developer review analytics, and the lead time on the DevOps page. API: add `?branches=main&branches=develop` to the PR-based endpoints (section 9).
+
+The target branch is recorded when PRs are synced. PRs synced before this feature have no target branch until you sync once with **Full refresh on sync**. Until then they are excluded whenever a branch is selected, and the dropdown shows how many PRs that affects.
+
+---
+
 ## 5) Running the API and UI separately (without Docker)
 
 Use this for development, or if you prefer not to run the app in Docker. You need:
@@ -550,7 +565,99 @@ The underlying rules:
 
 ---
 
-## 8) API reference
+## 8) Production deployment (HTTPS, certificates, hardening)
+
+The Docker image is ready for production as is. Certificates are handled by the container's entrypoint (`docker/entrypoint.sh`), which runs as root only to prepare them, then starts the app as the unprivileged `appuser`.
+
+### 8.1 Certificates
+
+Put your files in `certs/`. The Dockerfile copies this folder into the image, and `docker-compose.yml` also mounts it read-only at runtime, so a restart picks up renewed certificates:
+
+```
+certs/
+├── tls/
+│   ├── server.crt      HTTPS certificate: full chain (server certificate first, then intermediates)
+│   ├── server.key      its private key, PEM (encrypted keys: set TLS_KEY_PASSWORD)
+│   └── client-ca.crt   optional: require client certificates signed by this CA (mutual TLS)
+└── ca/
+    └── *.crt / *.pem   extra CAs to trust for outbound HTTPS
+```
+
+Everything under `certs/` except its README is git-ignored, so keys are never committed. Keys baked into an image can be read by anyone who can pull it. Only push such images to a private registry, or keep `certs/` empty at build time and rely on the runtime mount.
+
+At startup, the entrypoint does the following:
+
+| Step | What happens |
+|---|---|
+| Extra CAs (`certs/ca/*.crt`, `*.pem`) | Each file is validated, then appended to the system CA bundle in `/app/run/ca-bundle.pem`. That bundle is exported as `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, so GitHub (Enterprise), Azure DevOps (Server), the LLM endpoints and a TLS-intercepting corporate proxy all work. |
+| HTTPS (`certs/tls/server.crt` + `server.key`) | Turns on automatically (`TLS_ENABLED=auto`). The key is checked against the certificate (and `TLS_KEY_PASSWORD`). It's copied to `/app/run/tls`, readable only by `appuser`, so a host key mounted as root-only `0600` still works. Uvicorn then serves HTTPS on the same port. |
+| Mutual TLS (`certs/tls/client-ca.crt`) | Clients must present a certificate signed by that CA. |
+| Fail fast | An invalid CA file, a key that doesn't match the certificate, a wrong key password, or `REQUIRE_TLS=true` without a certificate stops the container with a clear `entrypoint: ERROR: ...` message. |
+
+**Quick test with a self-signed certificate** (browsers will warn; use a real certificate in production):
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout certs/tls/server.key -out certs/tls/server.crt \
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+docker compose up -d --build
+curl -k https://localhost:8000/health
+```
+
+**Database over TLS** (managed PostgreSQL): put the server's CA in `certs/ca/` and use e.g.
+`DATABASE_URL=postgresql+psycopg2://user:pass@host:5432/db?sslmode=verify-full&sslrootcert=/app/certs/ca/db-ca.crt`.
+
+### 8.2 Run in production
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+`docker-compose.prod.yml` (requires Docker Compose 2.24+):
+
+- **requires HTTPS** (`REQUIRE_TLS=true`) and publishes it on `APP_PORT` (default **443**)
+- **does not publish PostgreSQL** on the host
+- turns off the API docs, and limits CORS to `CORS_ALLOW_ORIGINS`
+- uses `restart: always` and a 1 GB memory limit
+
+To use an external database, set `DATABASE_URL` in an override and remove the `db` service.
+
+**Behind a reverse proxy or load balancer** that terminates TLS: leave `certs/tls` empty (the app speaks HTTP), use the base `docker-compose.yml` (don't set `REQUIRE_TLS`), and set `FORWARDED_ALLOW_IPS` to the proxy's IP, so client IPs and the `https` scheme (for HSTS) come from `X-Forwarded-*`.
+
+### 8.3 What is hardened
+
+- **Container:**
+  - runs as the non-root `appuser` (uid 1000)
+  - application code is root-owned and read-only; only `snapshots/` and `/app/run` are writable
+  - compose sets `no-new-privileges`, drops all Linux capabilities except the few the entrypoint needs (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`), and rotates logs (10 MB × 5)
+- **Server:** uvicorn with `--proxy-headers`, no `Server` header, graceful shutdown (`GRACEFUL_SHUTDOWN_TIMEOUT`, default 30 s) and a keep-alive timeout. The healthcheck (`docker/healthcheck.py`) probes HTTP or HTTPS as configured.
+- **HTTP headers:** `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, and **HSTS** on HTTPS requests.
+- **API surface:** `CORS_ALLOW_ORIGINS` (default `*`; the bundled UI is same-origin and needs none). `ENABLE_API_DOCS=false` removes `/docs`, `/redoc` and `/openapi.json`.
+- **Secrets:** `GITHUB_TOKEN`, `AZURE_DEVOPS_PAT` and AI keys come from `.env` / the environment, never from the image. The TLS key password is passed to uvicorn through an environment variable, not the command line.
+
+### 8.4 Production settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TLS_ENABLED` | `auto` | `auto`: HTTPS when `certs/tls/server.crt` + `server.key` exist; `true` / `false` to force |
+| `REQUIRE_TLS` | `false` | Refuse to start without a certificate |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | `/app/certs/tls/server.crt` / `.key` | Certificate and key paths inside the container |
+| `TLS_KEY_PASSWORD` | – | Password of an encrypted private key |
+| `TLS_CLIENT_CA_FILE` | `/app/certs/tls/client-ca.crt` | Enables mutual TLS when the file exists |
+| `CA_CERTS_DIR` | `/app/certs/ca` | Extra CA certificates to trust |
+| `CORS_ALLOW_ORIGINS` | `*` | Comma-separated allowed origins (empty = none) |
+| `ENABLE_API_DOCS` | `true` | Serve `/docs`, `/redoc`, `/openapi.json` |
+| `LOG_LEVEL` | `info` | App and uvicorn log level |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies trusted for `X-Forwarded-*` |
+| `PORT` | `8000` | Port inside the container (map it with `APP_PORT`) |
+| `WEB_CONCURRENCY` | `1` | Uvicorn workers. **Keep 1:** the one-sync-at-a-time lock and sync status live in the process. For more capacity, give the container more CPU/memory |
+| `KEEP_ALIVE_TIMEOUT` / `GRACEFUL_SHUTDOWN_TIMEOUT` | `5` / `30` | Seconds |
+
+The container runs any other command through the same entrypoint, with the CA bundle set up. For example, `docker compose run --rm app python -c "import requests; print(requests.get('https://github.example.com').status_code)"` checks that your corporate CA is trusted.
+
+---
+
+## 9) API reference
 
 Full interactive documentation: **<http://localhost:8000/docs>**.
 
@@ -572,6 +679,7 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/ingest/status` | `running` or `idle`, plus `last_run` statistics (PRs updated, unchanged, GitHub requests, snapshot saved) |
 | GET | `/api/snapshots` | Saved snapshots, newest first |
 | POST | `/api/snapshots` | Save a snapshot of the current data |
+| GET | `/api/branches` | Target branches of stored PRs with PR counts (`?days=`, `?team=`), plus PRs with no recorded branch |
 | GET | `/api/people` | Configured people with their GitHub login, Azure DevOps identities and matched PR / work item counts, plus unlinked Azure identities |
 | GET | `/api/devops/config` | Azure DevOps connection status (no secrets) and stored counts |
 | POST | `/api/devops/sync` | Start an Azure DevOps sync. Body: `{"lookback_days": 30}`. `400` if not configured, `409` if a sync is running |
@@ -586,13 +694,14 @@ Query parameters:
 
 - `?days=N` (default `30`): the window, i.e. PRs created or merged in the last N days. Applies to `/api/team-performance`, `/api/dora/*`, `/api/developers/{username}/dora` and `/api/chart/*`. The dashboard sends its **Lookback** value.
 - DevOps endpoints take `date_from` / `date_to` (`YYYY-MM-DD`, default the last 30 days), repeatable `tags` and `types`, `tag_mode=any|all`, `person`, `team` and `status=completed|all`.
+- `?branches=<name>` (repeatable): only PRs targeting these branches. Applies to `/api/team-performance`, `/api/dora/team`, `/api/chart/*`, `/api/developers/{username}/dora`, `/api/developers/{username}/analytics`, `/api/devops/dora` and `/api/devops/report`.
 - `?team=<TeamName>`: scopes the team-level endpoints (`/api/team-performance`, `/api/dora/team`, `/api/developers`, `/api/chart/*`) to one configured team. An unknown team returns `404`. Without it, they cover all configured teams, or everyone when no teams are configured.
 
 > **Security note:** the API has **no authentication**. Anyone who can reach the port can read the metrics and trigger syncs (which use your GitHub token's rate limit). Run it on a trusted network or behind an authenticating reverse proxy.
 
 ---
 
-## 9) What the metrics mean
+## 10) What the metrics mean
 
 This project only sees GitHub data (PRs, reviews, comments, commits), not deployments or incidents. So the delivery metrics are **GitHub-based proxies inspired by DORA**, not real DORA metrics.
 
@@ -617,7 +726,7 @@ The **Provider** tag on a developer's card names the analyzer that produced the 
 
 ---
 
-## 10) Project layout
+## 11) Project layout
 
 ```
 app/
@@ -643,14 +752,17 @@ scripts/                seed_data.sql (demo data), seed_devops.sql (Azure demo d
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse
 snapshots/              Data snapshots (created by the app; git-ignored)
-docker/entrypoint.sh    Container entrypoint: makes ./snapshots writable, then drops root
+docker/entrypoint.sh    Container entrypoint: certificates (TLS, extra CAs), permissions, uvicorn settings, drops root
+docker/healthcheck.py   Container healthcheck (HTTP or HTTPS)
+certs/                  TLS certificate/key and extra CAs (git-ignored; see certs/README.md)
+docker-compose.prod.yml Production overrides (HTTPS required, DB not published, limits)
 Dockerfile              Multi-stage build: UI (Node) + API (Python) in one image
 docker-compose.yml      PostgreSQL + app (+ optional Ollama)
 ```
 
 ---
 
-## 11) Running the tests
+## 12) Running the tests
 
 The backend tests use an in-memory SQLite database and need no PostgreSQL, GitHub token or LLM:
 
@@ -669,10 +781,14 @@ npm run build
 
 ---
 
-## 12) Troubleshooting
+## 13) Troubleshooting
 
 | Symptom | Fix |
 |---|---|
+| Container exits with `entrypoint: ERROR: ...` | The message names the problem: invalid CA file, certificate/key mismatch, wrong `TLS_KEY_PASSWORD`, or `REQUIRE_TLS` without a certificate (section 8.1) |
+| `SSL: CERTIFICATE_VERIFY_FAILED` when syncing | A corporate proxy or self-hosted GitHub/Azure DevOps uses a private CA: put its certificate in `certs/ca/` and restart |
+| Browser shows a certificate warning | The certificate isn't trusted by the browser (self-signed), or its name doesn't match the URL; use a certificate for the host name you open |
+| Selecting a target branch hides older PRs | They were synced before target branches were recorded: run a GitHub sync with **Full refresh on sync** |
 | DevOps page says "Not configured" | Set `AZURE_DEVOPS_PAT` in `.env` and `azure_devops.organization` / `projects` in `config.yaml`, then restart (section 7.2) |
 | Azure sync fails with "rejected the credentials" | The PAT is expired, belongs to another organization, or lacks the **Work Items: Read** / **Build: Read** scopes |
 | DORA shows "No production deployments" | `deployment_pattern` / `production_pattern` don't match your pipeline names; the page header shows the patterns in use |

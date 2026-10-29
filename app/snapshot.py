@@ -64,6 +64,7 @@ PULL_REQUEST_FIELDS = (
     "last_review_comment_at",
     "github_updated_at",
     "merge_commit_sha",
+    "base_branch",
 )
 COMMENT_FIELDS = ("comment_type", "author_login", "body", "path", "review_state", "created_at")
 DATETIME_FIELDS = {

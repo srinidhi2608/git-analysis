@@ -25,6 +25,7 @@ from app.queries import (
     get_pr_cycle_time_by_developer,
     get_prs_per_week,
     get_all_developers,
+    get_target_branches,
 )
 from app.ingest import run_ingestion, sync_developer_teams
 from app.models import AzurePipelineRun, AzureWorkItem, Developer, PullRequest
@@ -45,7 +46,10 @@ from app.devops_metrics import (
     summarize_stories,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 active_repos: list = []
 T = TypeVar("T")
@@ -53,6 +57,18 @@ T = TypeVar("T")
 DISCONNECT_POLL_SECONDS = 0.5
 # Dashboard window ("Lookback" in the UI), in days.
 WindowDays = Query(30, ge=1, le=3650, description="Only include PRs created or merged in the last N days")
+
+
+def target_branches(
+    branches: list[str] = Query(
+        default=[],
+        description="Only PRs targeting these base branches; repeat for several (e.g. ?branches=main&branches=develop)",
+    ),
+) -> list[str] | None:
+    """Optional target-branch filter shared by the PR-based endpoints."""
+    return [branch for branch in branches if branch] or None
+
+
 # Non-standard "Client Closed Request" status (nginx convention); the client never sees it.
 CLIENT_CLOSED_REQUEST = 499
 # Only one ingestion (or snapshot save/load) may run at a time; concurrent runs
@@ -327,15 +343,41 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Git Analysis API", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(
+    title="Git Analysis API",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.enable_api_docs else None,
+    redoc_url="/redoc" if settings.enable_api_docs else None,
+    openapi_url="/openapi.json" if settings.enable_api_docs else None,
 )
+
+_cors_origins = [origin.strip() for origin in settings.cors_allow_origins.split(",") if origin.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Standard hardening headers; HSTS only over HTTPS (direct, or via a proxy's X-Forwarded-Proto)."""
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -441,13 +483,29 @@ def get_active_repositories():
 
 
 @app.get("/api/team-performance", response_model=list[TeamPerformanceResponse])
-def team_performance(team: str | None = None, days: int = WindowDays, db: Session = Depends(get_db)):
-    return get_team_performance_metrics(db, days=days, teams=_resolve_teams(team))
+def team_performance(
+    team: str | None = None,
+    days: int = WindowDays,
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
+    return get_team_performance_metrics(db, days=days, teams=_resolve_teams(team), branches=branches)
 
 
 @app.get("/api/dora/team", response_model=TeamDoraMetricsResponse)
-def team_dora_metrics(team: str | None = None, days: int = WindowDays, db: Session = Depends(get_db)):
-    return get_team_dora_metrics(db, window_days=days, teams=_resolve_teams(team))
+def team_dora_metrics(
+    team: str | None = None,
+    days: int = WindowDays,
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
+    return get_team_dora_metrics(db, window_days=days, teams=_resolve_teams(team), branches=branches)
+
+
+@app.get("/api/branches")
+def list_target_branches(team: str | None = None, days: int | None = Query(None, ge=1, le=3650), db: Session = Depends(get_db)):
+    """Target (base) branches of the stored PRs, with PR counts, for the branch filter."""
+    return get_target_branches(db, days=days, teams=_resolve_teams(team))
 
 
 @app.get("/api/developers", response_model=list[DeveloperItem])
@@ -494,9 +552,16 @@ async def cancel_on_disconnect(request: Request, work: Awaitable[T]) -> T:
 
 
 @app.get("/api/developers/{github_username}/analytics", response_model=DeveloperAnalyticsResponse)
-async def developer_analytics(github_username: str, request: Request, db: Session = Depends(get_db)):
+async def developer_analytics(
+    github_username: str,
+    request: Request,
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
     try:
-        analytics = await cancel_on_disconnect(request, get_developer_review_analytics(db, github_username))
+        analytics = await cancel_on_disconnect(
+            request, get_developer_review_analytics(db, github_username, branches=branches)
+        )
     except HTTPException as exc:
         if exc.status_code == CLIENT_CLOSED_REQUEST:
             logger.info("Analytics request for %s cancelled: the client disconnected.", github_username)
@@ -507,19 +572,29 @@ async def developer_analytics(github_username: str, request: Request, db: Sessio
 
 
 @app.get("/api/developers/{github_username}/dora", response_model=DeveloperDoraMetricsResponse)
-def developer_dora_metrics(github_username: str, days: int = WindowDays, db: Session = Depends(get_db)):
-    metrics = get_developer_dora_metrics(db, github_username, window_days=days)
+def developer_dora_metrics(
+    github_username: str,
+    days: int = WindowDays,
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
+    metrics = get_developer_dora_metrics(db, github_username, window_days=days, branches=branches)
     if metrics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return metrics
 
 
 @app.get("/api/chart/pr-cycle-by-developer", response_model=list[PrCycleByDeveloperItem])
-def chart_pr_cycle_by_developer(team: str | None = None, days: int = WindowDays, db: Session = Depends(get_db)):
+def chart_pr_cycle_by_developer(
+    team: str | None = None,
+    days: int = WindowDays,
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
     team_config = load_team_config()
     return [
         {**row, "label": team_config.display_name(row["developer"])}
-        for row in get_pr_cycle_time_by_developer(db, days=days, teams=_resolve_teams(team))
+        for row in get_pr_cycle_time_by_developer(db, days=days, teams=_resolve_teams(team), branches=branches)
     ]
 
 
@@ -529,8 +604,9 @@ def chart_prs_per_week(
     developer: str | None = None,
     team: str | None = None,
     days: int = WindowDays,
+    branches: list[str] | None = Depends(target_branches),
 ):
-    return get_prs_per_week(db, developer=developer, days=days, teams=_resolve_teams(team))
+    return get_prs_per_week(db, developer=developer, days=days, teams=_resolve_teams(team), branches=branches)
 
 
 def _background_ingest(lookback_days: int = 7, full_refresh: bool = False):
@@ -777,7 +853,11 @@ def devops_stories(filters: StoryFilters = Depends(story_filters), db: Session =
 
 
 @app.get("/api/devops/dora")
-def devops_dora(filters: StoryFilters = Depends(story_filters), db: Session = Depends(get_db)):
+def devops_dora(
+    filters: StoryFilters = Depends(story_filters),
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
     """DORA metrics (DevLake definitions) for everyone, a team, or one person."""
     return compute_dora(
         db,
@@ -787,6 +867,7 @@ def devops_dora(filters: StoryFilters = Depends(story_filters), db: Session = De
         filters.date_to,
         person=filters.person,
         team=filters.team,
+        branches=branches,
     )
 
 
@@ -794,6 +875,7 @@ def devops_dora(filters: StoryFilters = Depends(story_filters), db: Session = De
 def devops_report(
     format: str = Query("markdown", description="'markdown' or 'csv'"),
     filters: StoryFilters = Depends(story_filters),
+    branches: list[str] | None = Depends(target_branches),
     db: Session = Depends(get_db),
 ):
     """Download a report of the filtered work items (CSV, or Markdown with summary, DORA and efficiency)."""
@@ -816,6 +898,7 @@ def devops_report(
         filters.date_to,
         person=filters.person,
         team=filters.team,
+        branches=branches,
     )
     report = markdown_report(
         filters,
@@ -840,6 +923,7 @@ def devops_report(
 # serves the built assets so no separate web server is needed.
 
 _FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+API_DOC_PATHS = {"docs", "redoc", "openapi.json", "docs/oauth2-redirect"}
 
 if _FRONTEND_DIST.is_dir():
     # Serve JS/CSS/image assets under /assets
@@ -848,7 +932,8 @@ if _FRONTEND_DIST.is_dir():
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
         """Return index.html for any path not matched by an API route."""
-        if full_path == "api" or full_path.startswith("api/"):
+        if full_path == "api" or full_path.startswith("api/") or full_path in API_DOC_PATHS:
+            # Unknown API routes, and the API docs when ENABLE_API_DOCS=false.
             raise HTTPException(status_code=404, detail="Not Found")
         # Serve real files from the build root (favicon.svg, icons.svg, ...).
         candidate = (_FRONTEND_DIST / full_path).resolve()

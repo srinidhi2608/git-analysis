@@ -45,6 +45,7 @@ from app.models import (
     PullRequest,
     Repository,
 )
+from app.queries import in_branches
 from app.teams import TeamConfig
 
 SUCCESS_RESULTS = {"succeeded", "partiallysucceeded"}
@@ -522,6 +523,7 @@ def compute_dora(
     date_to: date,
     person: str | None = None,
     team: str | None = None,
+    branches: list[str] | None = None,
 ) -> dict[str, Any]:
     start, end = _range_bounds(date_from, date_to)
     deployments = _production_deployments(db, config, start - LOOKBACK_FOR_LINKING)
@@ -533,6 +535,7 @@ def compute_dora(
         .join(Repository, PullRequest.repo_id == Repository.id)
         .join(Developer, PullRequest.developer_id == Developer.id)
         .filter(PullRequest.merged_at >= start - LOOKBACK_FOR_LINKING, PullRequest.merged_at < end)
+        .filter(in_branches(branches))
     )
     prs = pr_query.all()
     if person:
