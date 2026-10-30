@@ -32,6 +32,14 @@ from app.models import AzurePipelineRun, AzureWorkItem, Developer, PullRequest
 from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_snapshot
 from app.teams import load_team_config
 from app.time_window import TimeWindow
+from app.lifecycle_config import load_lifecycle_config
+from app.story_lifecycle import (
+    build_story_lifecycles,
+    lifecycle_csv,
+    pull_requests_csv,
+    summarize_lifecycles,
+    transitions_csv,
+)
 from app.devops_config import load_devops_config
 from app.devops_ingest import run_devops_ingestion
 from app.devops_metrics import (
@@ -964,6 +972,56 @@ def devops_report(
         report,
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="devops-report-{stamp}.md"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Story lifecycle (Story Quality page and CSV reports)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/stories/lifecycle")
+def story_lifecycle(filters: StoryFilters = Depends(story_filters), db: Session = Depends(get_db)):
+    """User stories with their stage timeline, linked PRs, people, rework and quality flags.
+
+    ``status=completed`` (default): stories released or closed in the date range;
+    ``status=all``: also stories still in progress during the range.
+    """
+    config = load_lifecycle_config()
+    rows = build_story_lifecycles(db, filters, load_team_config(), config)
+    return {
+        "filters": filters.describe(),
+        "config": config.describe(),
+        "summary": summarize_lifecycles(rows, config),
+        "stories": rows,
+    }
+
+
+STORY_REPORTS = {
+    "story-lifecycle": "one row per story",
+    "story-transitions": "one row per state change",
+    "story-pull-requests": "one row per story and linked pull request",
+}
+
+
+@app.get("/api/reports/{report}.csv")
+def story_report_csv(report: str, filters: StoryFilters = Depends(story_filters), db: Session = Depends(get_db)):
+    """CSV reports: ``story-lifecycle``, ``story-transitions`` or ``story-pull-requests`` (same filters as the page)."""
+    if report not in STORY_REPORTS:
+        raise HTTPException(status_code=404, detail=f"Unknown report; use one of {', '.join(STORY_REPORTS)}")
+    config = load_lifecycle_config()
+    rows = build_story_lifecycles(db, filters, load_team_config(), config)
+    if report == "story-lifecycle":
+        body = lifecycle_csv(rows, config)
+    elif report == "story-transitions":
+        body = transitions_csv(rows, config)
+    else:
+        body = pull_requests_csv(rows)
+    stamp = f"{filters.date_from:%Y%m%d}-{filters.date_to:%Y%m%d}"
+    return Response(
+        body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{report}-{stamp}.csv"'},
     )
 
 

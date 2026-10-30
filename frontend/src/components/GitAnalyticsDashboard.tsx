@@ -14,6 +14,7 @@ import {
 } from "recharts";
 import BranchSelect, { type BranchOption } from "./BranchSelect";
 import DevOpsIntegrationPage from "./DevOpsIntegrationPage";
+import StoryQualityPage from "./StoryQualityPage";
 import DateTimeRangePicker from "./DateTimeRangePicker";
 import { type DateRange, defaultRange, rangeShortLabel, rangeToApi, readStoredRange, storeRange } from "./dateRange";
 
@@ -37,7 +38,7 @@ function readStoredBranches(): string[] {
   }
 }
 
-type TabKey = "team" | "individual" | "devops";
+type TabKey = "team" | "individual" | "devops" | "stories";
 type IndivTabKey = "summary" | "dora" | "ai_metrics" | "reviewers";
 
 type TrendDirection = "up" | "down";
@@ -1440,6 +1441,15 @@ export default function GitAnalyticsDashboard() {
                 >
                   DevOps Integration
                 </button>
+                <button
+                  className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                    activeTab === "stories" ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"
+                  }`}
+                  onClick={() => setActiveTab("stories")}
+                  type="button"
+                >
+                  Story Quality
+                </button>
               </div>
             </div>
           </div>
@@ -1485,7 +1495,9 @@ export default function GitAnalyticsDashboard() {
           {error && <p className="mt-3 rounded-lg bg-red-900/40 px-4 py-2 text-sm text-red-300">{error}</p>}
         </div>
 
-        {activeTab === "devops" ? (
+        {activeTab === "stories" ? (
+          <StoryQualityPage dateRange={dateRange} />
+        ) : activeTab === "devops" ? (
           <DevOpsIntegrationPage
             branchOptions={branchOptions}
             dateRange={dateRange}

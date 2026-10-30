@@ -36,3 +36,23 @@ repositories:
 #   incidents:                                 # optional: work items that are incidents
 #     work_item_types: ["Bug"]
 #     tags: ["Incident"]
+
+# Optional: Story Quality page (story lifecycle). The defaults below match a
+# New → Active → QA Dev → QAA → INT → Released / Closed board; change them to
+# your own Azure Boards state names. See docs/story-lifecycle.md.
+#
+# lifecycle:
+#   story_types: ["User Story", "Product Backlog Item"]
+#   stages:                     # in workflow order; every state belongs to one stage
+#     - {name: new,      label: "New",            kind: wait,     states: ["New"]}
+#     - {name: dev,      label: "Development",    kind: work,     states: ["Active"]}
+#     - {name: qa,       label: "QA (lower env)", kind: work,     states: ["QA Dev In Progress"]}
+#     - {name: qa_done,  label: "QA complete",    kind: wait,     states: ["QA Dev Complete"]}
+#     - {name: qaa,      label: "QAA testing",    kind: work,     states: ["QAA In Progress"]}
+#     - {name: qaa_done, label: "QAA complete",   kind: wait,     states: ["QAA Complete"]}
+#     - {name: int,      label: "INT",            kind: work,     states: ["INT"]}
+#     - {name: released, label: "Released",       kind: released, states: ["Released"]}
+#     - {name: closed,   label: "Closed",         kind: closed,   states: ["Closed", "Removed"]}
+#   release_tag_pattern: '(?i)^release\s*v?(\d+(?:\.\d+){0,2})$'   # "Release 2026.10.1"
+#   testing:
+#     enabled: false            # placeholder until test results/coverage are integrated

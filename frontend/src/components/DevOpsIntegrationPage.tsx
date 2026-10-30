@@ -37,6 +37,7 @@ interface SyncRun {
   range?: { start: string; end: string; days: number };
   work_items?: number;
   pipeline_runs?: number;
+  histories_fetched?: number;
   skipped_work_items?: number;
   skipped_identities?: { identity: string; work_items: number }[];
   azure_requests?: number;
@@ -391,7 +392,8 @@ export default function DevOpsIntegrationPage({
         setPageError(`Azure DevOps sync failed: ${run.error}`);
       } else if (run) {
         setSyncMessage(
-          `Synced ${run.work_items ?? 0} work item(s) and ${run.pipeline_runs ?? 0} pipeline run(s) ` +
+          `Synced ${run.work_items ?? 0} work item(s) (${run.histories_fetched ?? 0} state histories downloaded) ` +
+            `and ${run.pipeline_runs ?? 0} pipeline run(s) ` +
             `with ${run.azure_requests ?? 0} Azure DevOps request(s)` +
             (run.skipped_work_items
               ? `; skipped ${run.skipped_work_items} item(s) of people not in a team (` +

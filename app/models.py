@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -60,6 +60,14 @@ class PullRequest(Base):
     base_branch: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     # Merge commit SHA, used to find the deployment that shipped this PR (DORA lead time).
     merge_commit_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    # OPEN / CLOSED / MERGED on GitHub; CLOSED without merged_at = abandoned.
+    state: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    head_branch: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # GitHub's numeric PR id (Azure Boards "GitHub Pull Request" links use it).
+    github_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
+    # Azure work item ids mentioned as AB#<id> in the PR title or description, comma-separated.
+    work_item_refs: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     repository: Mapped["Repository"] = relationship("Repository", back_populates="pull_requests")
     developer: Mapped["Developer"] = relationship("Developer", back_populates="pull_requests")
@@ -127,10 +135,63 @@ class AzureWorkItem(Base):
     iteration_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     area_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    parent_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    # System.ChangedDate when the state history was last downloaded (skip if unchanged).
+    history_changed_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     tags: Mapped[list["AzureWorkItemTag"]] = relationship(
         "AzureWorkItemTag", back_populates="work_item", cascade="all, delete-orphan"
     )
+    history: Mapped[list["AzureWorkItemStateChange"]] = relationship(
+        "AzureWorkItemStateChange",
+        back_populates="work_item",
+        cascade="all, delete-orphan",
+        order_by="AzureWorkItemStateChange.rev",
+    )
+    relations: Mapped[list["AzureWorkItemRelation"]] = relationship(
+        "AzureWorkItemRelation", back_populates="work_item", cascade="all, delete-orphan"
+    )
+
+
+class AzureWorkItemStateChange(Base):
+    """One revision of a work item that changed its state and/or assignee.
+
+    ``state`` and ``assigned_to`` are the values in effect after the revision;
+    ``from_state`` is set only when the state changed.
+    """
+
+    __tablename__ = "azure_work_item_state_changes"
+    __table_args__ = (UniqueConstraint("work_item_id", "rev", name="uq_azure_work_item_state_change"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    work_item_id: Mapped[int] = mapped_column(Integer, ForeignKey("azure_work_items.id"), nullable=False, index=True)
+    rev: Mapped[int] = mapped_column(Integer, nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    changed_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    changed_by_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    from_state: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    state: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    assigned_to: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    assigned_to_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    work_item: Mapped["AzureWorkItem"] = relationship("AzureWorkItem", back_populates="history")
+
+
+class AzureWorkItemRelation(Base):
+    """A current link of a work item: parent/child/related work items, GitHub PRs and commits."""
+
+    __tablename__ = "azure_work_item_relations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    work_item_id: Mapped[int] = mapped_column(Integer, ForeignKey("azure_work_items.id"), nullable=False, index=True)
+    rel: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Link type name, e.g. "Child", "Related", "GitHub Pull Request", "GitHub Commit".
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # Linked work item id, for work item links.
+    target_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    work_item: Mapped["AzureWorkItem"] = relationship("AzureWorkItem", back_populates="relations")
 
 
 class AzureWorkItemTag(Base):

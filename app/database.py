@@ -1,7 +1,7 @@
 import logging
 import re
 
-from sqlalchemy import DateTime, Integer, String, create_engine, inspect, text
+from sqlalchemy import BigInteger, DateTime, Integer, String, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -103,6 +103,16 @@ def ensure_database_schema():
         "github_updated_at": _compile_column_definition(DateTime()),
         "merge_commit_sha": _compile_column_definition(String(64)),
         "base_branch": _compile_column_definition(String(255)),
+        "state": _compile_column_definition(String(16)),
+        "closed_at": _compile_column_definition(DateTime()),
+        "head_branch": _compile_column_definition(String(255)),
+        "github_id": _compile_column_definition(BigInteger()),
+        "work_item_refs": _compile_column_definition(String(512)),
+    }
+    work_item_columns = {column["name"] for column in inspector.get_columns("azure_work_items")}
+    work_item_alterations = {
+        "parent_id": _compile_column_definition(Integer()),
+        "history_changed_date": _compile_column_definition(DateTime()),
     }
     commit_alterations = {
         "committed_at": _compile_column_definition(DateTime()),
@@ -112,6 +122,7 @@ def ensure_database_schema():
     with engine.begin() as connection:
         _apply_column_alterations(connection, "pull_requests", pull_request_columns, pull_request_alterations)
         _apply_column_alterations(connection, "commits", commit_columns, commit_alterations)
+        _apply_column_alterations(connection, "azure_work_items", work_item_columns, work_item_alterations)
         _apply_column_alterations(
             connection,
             "pull_request_comments",
