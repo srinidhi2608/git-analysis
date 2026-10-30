@@ -8,6 +8,7 @@ activity (were updated) within the lookback window.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -50,9 +51,13 @@ query($owner: String!, $repo: String!, $after: String) {
 
 PR_DETAIL_SELECTION = """
 number
+fullDatabaseId
 title
+body
+state
 updatedAt
 baseRefName
+headRefName
 mergeCommit { oid }
 createdAt
 mergedAt
@@ -105,6 +110,15 @@ reviewDecision
 """
 
 DETAIL_BATCH_SIZE = 10
+
+
+AB_REFERENCE = re.compile(r"AB#(\d+)", re.IGNORECASE)
+
+
+def work_item_refs(*texts: str | None) -> str | None:
+    """Comma-separated Azure Boards ids mentioned as ``AB#<id>`` in ``texts`` (``None`` if none)."""
+    ids = sorted({int(match) for text in texts if text for match in AB_REFERENCE.findall(text)})
+    return ",".join(str(item) for item in ids)[:512] or None
 
 
 def _aware(value: datetime) -> datetime:
@@ -442,6 +456,12 @@ query({", ".join(variable_definitions)}) {{
             "updated_at": node.get("updatedAt"),
             "merge_commit_sha": (node.get("mergeCommit") or {}).get("oid"),
             "base_branch": node.get("baseRefName"),
+            "head_branch": node.get("headRefName"),
+            "state": node.get("state"),
+            "closed_at": node.get("closedAt"),
+            "github_id": int(node["fullDatabaseId"]) if node.get("fullDatabaseId") else None,
+            # Only the AB#<id> work item references are kept from the description.
+            "work_item_refs": work_item_refs(node.get("title"), node.get("body")),
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
             "changed_files": node.get("changedFiles") or 0,

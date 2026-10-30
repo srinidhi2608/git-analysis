@@ -250,6 +250,11 @@ def run_ingestion(
                     github_updated_at=github_updated_at,
                     merge_commit_sha=pr_data.get("merge_commit_sha"),
                     base_branch=pr_data.get("base_branch"),
+                    state=pr_data.get("state"),
+                    closed_at=_parse_dt(pr_data.get("closed_at")),
+                    head_branch=pr_data.get("head_branch"),
+                    github_id=pr_data.get("github_id"),
+                    work_item_refs=pr_data.get("work_item_refs"),
                 )
                 db.add(pull_request)
                 db.flush()
@@ -275,6 +280,12 @@ def run_ingestion(
                 existing.github_updated_at = github_updated_at
                 existing.merge_commit_sha = pr_data.get("merge_commit_sha") or existing.merge_commit_sha
                 existing.base_branch = pr_data.get("base_branch") or existing.base_branch
+                existing.state = pr_data.get("state") or existing.state
+                existing.closed_at = _parse_dt(pr_data.get("closed_at")) or existing.closed_at
+                existing.head_branch = pr_data.get("head_branch") or existing.head_branch
+                existing.github_id = pr_data.get("github_id") or existing.github_id
+                if "work_item_refs" in pr_data:
+                    existing.work_item_refs = pr_data["work_item_refs"]
 
             for commit_data in pr_data.get("commits", []):
                 _upsert_commit(db, pull_request, dev, commit_data)

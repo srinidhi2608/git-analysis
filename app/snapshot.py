@@ -21,9 +21,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from app.devops_ingest import RUN_DATE_FIELDS, RUN_FIELDS, WORK_ITEM_DATE_FIELDS, WORK_ITEM_FIELDS, upsert_pipeline_run, upsert_work_item
+from app.devops_ingest import (
+    HISTORY_FIELDS,
+    RUN_DATE_FIELDS,
+    RUN_FIELDS,
+    WORK_ITEM_DATE_FIELDS,
+    WORK_ITEM_FIELDS,
+    replace_history,
+    upsert_pipeline_run,
+    upsert_work_item,
+)
 from app.models import (
     AzurePipelineRun,
     AzureWorkItem,
@@ -37,9 +46,10 @@ from app.models import (
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Version 2 adds Azure DevOps work items and pipeline runs; version 1 still loads.
-SNAPSHOT_FORMAT_VERSION = 2
-SUPPORTED_FORMAT_VERSIONS = (1, 2)
+# Version 2 adds Azure DevOps work items and pipeline runs; version 3 adds work
+# item state history and links. Older versions still load.
+SNAPSHOT_FORMAT_VERSION = 3
+SUPPORTED_FORMAT_VERSIONS = (1, 2, 3)
 TABLES = ("repositories", "developers", "pull_requests", "commits", "comments", "azure_work_items", "azure_pipeline_runs")
 SNAPSHOT_PATTERN = "snapshot-*.json.gz"
 _SAFE_NAME = re.compile(r"^snapshot-[0-9TZ-]+\.json\.gz$")
@@ -65,6 +75,11 @@ PULL_REQUEST_FIELDS = (
     "github_updated_at",
     "merge_commit_sha",
     "base_branch",
+    "state",
+    "closed_at",
+    "head_branch",
+    "github_id",
+    "work_item_refs",
 )
 COMMENT_FIELDS = ("comment_type", "author_login", "body", "path", "review_state", "created_at")
 DATETIME_FIELDS = {
@@ -74,6 +89,9 @@ DATETIME_FIELDS = {
     "last_review_comment_at",
     "github_updated_at",
     "committed_at",
+    "closed_at",
+    "changed_at",
+    "history_changed_date",
     *WORK_ITEM_DATE_FIELDS,
     *RUN_DATE_FIELDS,
 }
@@ -164,8 +182,22 @@ def export_data(db: Session) -> dict[str, Any]:
                 **{field: getattr(item, field) for field in WORK_ITEM_FIELDS},
                 **{field: _dump_value(getattr(item, field)) for field in WORK_ITEM_DATE_FIELDS},
                 "tags": [tag.tag for tag in item.tags],
+                "history_changed_date": _dump_value(item.history_changed_date),
+                "history": [
+                    {
+                        "changed_at": _dump_value(change.changed_at),
+                        **{field: getattr(change, field) for field in HISTORY_FIELDS},
+                    }
+                    for change in item.history
+                ],
+                "relations": [
+                    {"rel": link.rel, "name": link.name, "url": link.url, "target_id": link.target_id}
+                    for link in item.relations
+                ],
             }
-            for item in db.query(AzureWorkItem).all()
+            for item in db.query(AzureWorkItem).options(
+                selectinload(AzureWorkItem.tags), selectinload(AzureWorkItem.history), selectinload(AzureWorkItem.relations)
+            )
         ],
         "azure_pipeline_runs": [
             {
@@ -263,7 +295,15 @@ def import_data(db: Session, data: dict[str, Any]) -> dict[str, int]:
         comment.body = comment.body or ""
 
     for row in data.get("azure_work_items", []):
-        upsert_work_item(db, {**row, **{field: _load_value(field, row.get(field)) for field in WORK_ITEM_DATE_FIELDS}})
+        item = upsert_work_item(db, {**row, **{field: _load_value(field, row.get(field)) for field in WORK_ITEM_DATE_FIELDS}})
+        if "history" in row:
+            replace_history(
+                db,
+                item,
+                [{**entry, "changed_at": _load_value("changed_at", entry.get("changed_at"))} for entry in row["history"]],
+                row.get("relations") or [],
+            )
+            item.history_changed_date = _load_value("history_changed_date", row.get("history_changed_date"))
     for row in data.get("azure_pipeline_runs", []):
         upsert_pipeline_run(db, {**row, **{field: _load_value(field, row.get(field)) for field in RUN_DATE_FIELDS}})
 

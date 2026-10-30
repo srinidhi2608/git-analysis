@@ -4,6 +4,9 @@ Uses the REST API (api-version 7.1) with a personal access token (PAT):
 
 * Work items: a WIQL query returns the ids changed since a date, then
   ``workitemsbatch`` loads their fields 200 at a time.
+* Work item history: ``workItems/{id}/updates`` returns every revision's
+  changed fields (state, assignee) and added/removed links (parent, child,
+  related, GitHub pull requests and commits), used for the story lifecycle.
 * Pipelines: ``_apis/build/builds`` lists completed runs finished since a date,
   following ``x-ms-continuationtoken`` paging.
 
@@ -13,6 +16,7 @@ Required PAT scopes: Work Items (Read), Build (Read).
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -46,7 +50,10 @@ WORK_ITEM_FIELDS = [
     "Microsoft.VSTS.Common.ClosedDate",
     "Microsoft.VSTS.Scheduling.StoryPoints",
     "Microsoft.VSTS.Scheduling.Effort",
+    "System.Parent",
 ]
+UPDATES_PAGE_SIZE = 200
+WORK_ITEM_URL = re.compile(r"/workItems/(\d+)$", re.IGNORECASE)
 
 
 class AzureDevOpsError(RuntimeError):
@@ -193,7 +200,31 @@ class AzureDevOpsClient:
             "area_path": fields.get("System.AreaPath"),
             "tags": split_tags(fields.get("System.Tags")),
             "url": f"{self.base_url}/{quote(project, safe='')}/_workitems/edit/{work_item_id}",
+            "parent_id": int(fields["System.Parent"]) if fields.get("System.Parent") else None,
         }
+
+    # ------------------------------------------------------------------
+    # Work item history
+    # ------------------------------------------------------------------
+
+    def fetch_work_item_updates(self, project: str, work_item_id: int) -> dict[str, Any]:
+        """State/assignee history and current links of one work item.
+
+        Returns ``{"history": [...], "relations": [...]}`` (see ``normalize_updates``).
+        """
+        updates: list[dict[str, Any]] = []
+        skip = 0
+        while True:
+            response = self._request(
+                "GET",
+                self._project_url(project, f"wit/workItems/{work_item_id}/updates"),
+                params={"$top": UPDATES_PAGE_SIZE, "$skip": skip},
+            )
+            page = response.json().get("value", [])
+            updates.extend(page)
+            if len(page) < UPDATES_PAGE_SIZE:
+                return normalize_updates(updates)
+            skip += UPDATES_PAGE_SIZE
 
     # ------------------------------------------------------------------
     # Pipelines
@@ -244,3 +275,68 @@ class AzureDevOpsClient:
             "finish_time": _date(raw.get("finishTime")),
             "url": ((raw.get("_links") or {}).get("web") or {}).get("href"),
         }
+
+
+def _new_value(fields: dict[str, Any], name: str) -> tuple[bool, Any, Any]:
+    """(changed, old value, new value) of field ``name`` in one update."""
+    change = fields.get(name)
+    if not isinstance(change, dict):
+        return False, None, None
+    return True, change.get("oldValue"), change.get("newValue")
+
+
+def normalize_updates(updates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Turn ``workItems/{id}/updates`` into state history and current relations.
+
+    ``history`` holds one entry per revision that changed the state or the
+    assignee, with the state and assignee in effect *after* that revision.
+    ``relations`` replays the added/removed links to the current set.
+    """
+    history: list[dict[str, Any]] = []
+    relations: dict[tuple[str, str], dict[str, Any]] = {}
+    state: str | None = None
+    assignee: tuple[str | None, str | None] = (None, None)
+    for update in sorted(updates, key=lambda item: item.get("rev") or item.get("id") or 0):
+        fields = update.get("fields") or {}
+        state_changed, old_state, new_state = _new_value(fields, "System.State")
+        assignee_changed, _, new_assignee = _new_value(fields, "System.AssignedTo")
+        if state_changed:
+            state = new_state
+        if assignee_changed:
+            assignee = _identity(new_assignee)
+        if state_changed or assignee_changed:
+            _, _, changed_date = _new_value(fields, "System.ChangedDate")
+            by_name, by_email = _identity(update.get("revisedBy"))
+            history.append(
+                {
+                    "rev": int(update.get("rev") or update.get("id") or len(history) + 1),
+                    "changed_at": changed_date or update.get("revisedDate"),
+                    "changed_by": by_name,
+                    "changed_by_email": by_email,
+                    "from_state": old_state if state_changed else None,
+                    "state": state,
+                    "assigned_to": assignee[0],
+                    "assigned_to_email": assignee[1],
+                }
+            )
+        links = update.get("relations") or {}
+        for link in links.get("added") or []:
+            if link.get("url") and link.get("rel"):
+                relations[(link["rel"], link["url"])] = link
+        for link in links.get("removed") or []:
+            relations.pop((link.get("rel"), link.get("url")), None)
+    return {
+        "history": [entry for entry in history if entry["changed_at"]],
+        "relations": [_normalize_relation(link) for link in relations.values()],
+    }
+
+
+def _normalize_relation(link: dict[str, Any]) -> dict[str, Any]:
+    url = link["url"]
+    match = WORK_ITEM_URL.search(url)
+    return {
+        "rel": link["rel"],
+        "name": (link.get("attributes") or {}).get("name"),
+        "url": url,
+        "target_id": int(match.group(1)) if match else None,
+    }

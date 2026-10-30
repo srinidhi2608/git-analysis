@@ -7,6 +7,7 @@ It pulls PRs, reviews, review comments and commits for the repositories you choo
 - **Team overview**: for all teams or one selected team, PR cycle time, merged PRs per week, and **DORA-inspired delivery metrics** (merge frequency, lead time, time to first review, review coverage, approval rate, change-failure proxy, recovery time) with weekly trends.
 - **Individual performance**: for each developer, PR size, review-comment density, requested-changes rate, rework after feedback, follow-up speed, recurring review themes, top reviewers and the languages they work in.
 - **DevOps Integration (optional)**: connects **Azure Boards** (user stories, bugs, tasks) and **Azure Pipelines** (deployments) to the GitHub data. You can filter stories by tag, date range, team or person, export reports, see each developer's and tester's delivery, and get **DORA metrics** (deployment frequency, lead time for changes, change failure rate, failed deployment recovery time) for the team or a single person. The definitions follow [Apache DevLake](https://devlake.apache.org/).
+- **Story Quality (optional, with Azure DevOps)**: every user story's lifecycle from creation to release: time in each stage (Dev, QA, QAA, INT), linked pull requests, developers and testers, rework, integrity flags, and how much of the story's time went into code. Downloadable as CSV. See [docs/story-lifecycle.md](docs/story-lifecycle.md).
 - **AI summary (optional)**: written strengths, improvement areas, design-pattern and DRY/WET notes. These come from an online LLM (OpenAI or Gemini) or a local [Ollama](https://ollama.com) model, based on the actual review comments. A rule-based fallback always works, so no AI setup is required.
 
 > These metrics are signals to start a conversation, not a performance verdict. The AI and heuristic scores come from review comments and PR metadata only. They don't look at the code itself.
@@ -171,7 +172,7 @@ All settings are environment variables. The backend reads them from `.env` in th
 | `OLLAMA_BASE_URL` | no | `http://localhost:11434` (local) / `http://host.docker.internal:11434` (Compose) | Ollama server (tier 2) |
 | `OLLAMA_MODEL` | no | `qwen2.5-coder:14b` | Ollama model name |
 | `DEVELOPER_ANALYTICS_AI_URL` / `_TOKEN` / `_MODEL` | no | – | Optional OpenAI-compatible chat-completions endpoint for the developer *overview narrative*. If unset, a rule-based narrative is used |
-| `AZURE_DEVOPS_PAT` | no | – | Azure DevOps personal access token (Work Items: Read, Build: Read) for the DevOps Integration page |
+| `AZURE_DEVOPS_PAT` | no | – | Azure DevOps personal access token (Work Items: Read, Build: Read) for the DevOps Integration and Story Quality pages |
 | `SNAPSHOT_DIR` | no | `snapshots` | Where snapshots are written (`./snapshots` on the host with Docker Compose) |
 | `SNAPSHOT_AUTOLOAD` | no | `true` | Load the newest snapshot at startup when the database has no pull requests |
 | `SNAPSHOT_AFTER_SYNC` | no | `true` | Save a snapshot automatically after every successful sync |
@@ -586,6 +587,26 @@ The underlying rules:
 
 ---
 
+### 7.5 Story Quality: the story lifecycle report
+
+The **Story Quality** tab gives one row per user story. Each row has:
+
+- **When it moved**: when it entered each stage of your board (New → Active → QA Dev → QAA → INT → Released / Closed), and how long it spent in each.
+- **Its code**: the GitHub pull requests behind it (merged, open or abandoned) and lines changed.
+- **Its people**: who developed and who tested it.
+- **Rework and integrity checks**: bounces back from QA, reopened stories, skipped stages, stories closed without code, open PRs on finished stories, releases without a `Release x.y.z` tag.
+- **Time on code vs time on the story**: how much of the story's time the code itself took.
+
+All of it downloads as CSV: stories, state changes, and story–PR links.
+
+**To set it up:**
+
+1. Map your board states to stages in `config.yaml` under `lifecycle`. The defaults already match a New / Active / QA Dev In Progress / QA Dev Complete / QAA In Progress / QAA Complete / INT / Released / Closed board.
+2. Run **Sync Azure DevOps**. It now also downloads each changed work item's state history.
+3. Run one **Sync from GitHub** with **Full refresh on sync**.
+
+**Read [docs/story-lifecycle.md](docs/story-lifecycle.md)** for the full guide: configuration, how PRs are linked to stories, every definition and flag, the CSV columns, the API, and troubleshooting.
+
 ## 8) Production deployment (HTTPS, certificates, hardening)
 
 The Docker image is ready for production as is. Certificates are handled by the container's entrypoint (`docker/entrypoint.sh`), which runs as root only to prepare them, then starts the app as the unprivileged `appuser`.
@@ -709,6 +730,8 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/devops/stories` | Filtered work items + summary + efficiency by person |
 | GET | `/api/devops/dora` | DORA metrics for everyone, `?team=` or `?person=`, plus the pipeline runs behind them (`runs`, with `attributed_by`) |
 | GET | `/api/devops/report` | Download `?format=csv` or `?format=markdown` for the filtered work items |
+| GET | `/api/stories/lifecycle` | Story lifecycle rows (timeline, PRs, people, rework, flags) and summary; same filters as the DevOps endpoints plus `status=completed\|all` ([guide](docs/story-lifecycle.md#8-api)) |
+| GET | `/api/reports/{story-lifecycle\|story-transitions\|story-pull-requests}.csv` | Story CSV reports |
 | POST | `/api/snapshots/load` | Load the newest snapshot (or `{"name": ...}`), upserting into the database |
 
 Query parameters:
@@ -760,6 +783,8 @@ app/
   devops_config.py      azure_devops settings from config.yaml / .env
   devops_ingest.py      Azure DevOps sync (upsert, team filter)
   devops_metrics.py     Story filters, efficiency, DORA (DevLake definitions), reports
+  lifecycle_config.py   `lifecycle` settings: board states → stages, release tag pattern
+  story_lifecycle.py    Story lifecycle rows, story ↔ PR links, quality flags, CSV reports
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
@@ -770,7 +795,8 @@ app/
   developer_analytics.py  Per-developer review analytics + narrative
   ai_analyzers.py       Online LLM → Ollama → rule-based analyzer
 frontend/               React + Vite dashboard (src/components: GitAnalyticsDashboard, DevOpsIntegrationPage,
-                        DateTimeRangePicker + dateRange.ts, BranchSelect)
+                        StoryQualityPage, DateTimeRangePicker + dateRange.ts, BranchSelect)
+docs/                   story-lifecycle.md (Story Quality guide)
 scripts/                seed_data.sql (demo data), seed_devops.sql (Azure demo data), clear_data.sql (wipe data)
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse
@@ -812,6 +838,7 @@ npm run build
 | `SSL: CERTIFICATE_VERIFY_FAILED` when syncing | A corporate proxy or self-hosted GitHub/Azure DevOps uses a private CA: put its certificate in `certs/ca/` and restart |
 | Browser shows a certificate warning | The certificate isn't trusted by the browser (self-signed), or its name doesn't match the URL; use a certificate for the host name you open |
 | Selecting a target branch hides older PRs | They were synced before target branches were recorded: run a GitHub sync with **Full refresh on sync** |
+| Story Quality shows no stories, or warns about unmapped states | Run **Sync Azure DevOps** (it downloads state history), choose **Also in progress**, and map every board state under `lifecycle.stages` in `config.yaml`. See [the guide's troubleshooting](docs/story-lifecycle.md#10-troubleshooting) |
 | DevOps page says "Not configured" | Set `AZURE_DEVOPS_PAT` in `.env` and `azure_devops.organization` / `projects` in `config.yaml`, then restart (section 7.2) |
 | Azure sync fails with "rejected the credentials" | The PAT is expired, belongs to another organization, or lacks the **Work Items: Read** / **Build: Read** scopes |
 | DORA shows "No production deployments" | `deployment_pattern` / `production_pattern` don't match your pipeline names; the page header shows the patterns in use |
