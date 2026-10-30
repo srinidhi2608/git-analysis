@@ -31,6 +31,7 @@ from app.ingest import run_ingestion, sync_developer_teams
 from app.models import AzurePipelineRun, AzureWorkItem, Developer, PullRequest
 from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_snapshot
 from app.teams import load_team_config
+from app.time_window import TimeWindow
 from app.devops_config import load_devops_config
 from app.devops_ingest import run_devops_ingestion
 from app.devops_metrics import (
@@ -55,8 +56,34 @@ active_repos: list = []
 T = TypeVar("T")
 # How often a long-running request checks whether the browser has gone away.
 DISCONNECT_POLL_SECONDS = 0.5
-# Dashboard window ("Lookback" in the UI), in days.
-WindowDays = Query(30, ge=1, le=3650, description="Only include PRs created or merged in the last N days")
+
+
+def time_window(
+    date_from: str | None = Query(
+        None, description="Start of the range: ISO date or date-time (UTC unless an offset is given)"
+    ),
+    date_to: str | None = Query(None, description="End of the range (exclusive date-time, or a whole date). Default: now"),
+    days: int | None = Query(None, ge=1, le=3650, description="Last N days, when date_from is not given (default 30)"),
+) -> TimeWindow:
+    """Date/time range shared by the dashboard endpoints (PRs created or merged inside it)."""
+    try:
+        return TimeWindow.parse(date_from, date_to, default_days=days or 30)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date range: {exc}") from exc
+
+
+def _sync_range(date_from: datetime | None, date_to: datetime | None, lookback_days: int) -> TimeWindow:
+    """Range for a sync request: explicit dates, else the last ``lookback_days`` days."""
+    if lookback_days < 1:
+        raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
+    try:
+        return TimeWindow.parse(
+            date_from.isoformat() if date_from else None,
+            date_to.isoformat() if date_to else None,
+            default_days=lookback_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date range: {exc}") from exc
 
 
 def target_branches(
@@ -145,12 +172,18 @@ class IngestStatusResponse(BaseModel):
 
 
 class IngestRequest(BaseModel):
+    # Fetch PRs updated in [date_from, date_to); date_to defaults to now. Without
+    # date_from, the last `lookback_days` days.
+    date_from: datetime | None = None
+    date_to: datetime | None = None
     lookback_days: int = 7
-    # Re-download every PR in the lookback window, even ones unchanged on GitHub.
+    # Re-download every PR in the range, even ones unchanged on GitHub.
     full_refresh: bool = False
 
 
 class DevOpsSyncRequest(BaseModel):
+    date_from: datetime | None = None
+    date_to: datetime | None = None
     lookback_days: int = 30
 
 
@@ -273,7 +306,9 @@ class DeveloperAnalyticsResponse(BaseModel):
 
 
 class DoraSummaryResponse(BaseModel):
-    window_days: int
+    window_days: float
+    window_start: str | None = None
+    window_end: str | None = None
     pull_request_count: int
     merged_pull_request_count: int
     reviewed_pull_request_count: int
@@ -485,27 +520,37 @@ def get_active_repositories():
 @app.get("/api/team-performance", response_model=list[TeamPerformanceResponse])
 def team_performance(
     team: str | None = None,
-    days: int = WindowDays,
+    window: TimeWindow = Depends(time_window),
     branches: list[str] | None = Depends(target_branches),
     db: Session = Depends(get_db),
 ):
-    return get_team_performance_metrics(db, days=days, teams=_resolve_teams(team), branches=branches)
+    return get_team_performance_metrics(db, window=window, teams=_resolve_teams(team), branches=branches)
 
 
 @app.get("/api/dora/team", response_model=TeamDoraMetricsResponse)
 def team_dora_metrics(
     team: str | None = None,
-    days: int = WindowDays,
+    window: TimeWindow = Depends(time_window),
     branches: list[str] | None = Depends(target_branches),
     db: Session = Depends(get_db),
 ):
-    return get_team_dora_metrics(db, window_days=days, teams=_resolve_teams(team), branches=branches)
+    return get_team_dora_metrics(db, window=window, teams=_resolve_teams(team), branches=branches)
 
 
 @app.get("/api/branches")
-def list_target_branches(team: str | None = None, days: int | None = Query(None, ge=1, le=3650), db: Session = Depends(get_db)):
-    """Target (base) branches of the stored PRs, with PR counts, for the branch filter."""
-    return get_target_branches(db, days=days, teams=_resolve_teams(team))
+def list_target_branches(
+    team: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    days: int | None = Query(None, ge=1, le=3650),
+    db: Session = Depends(get_db),
+):
+    """Target (base) branches of the stored PRs, with PR counts, for the branch filter.
+
+    Without a range, every stored PR is counted.
+    """
+    window = time_window(date_from, date_to, days) if (date_from or date_to or days) else None
+    return get_target_branches(db, teams=_resolve_teams(team), window=window)
 
 
 @app.get("/api/developers", response_model=list[DeveloperItem])
@@ -574,11 +619,11 @@ async def developer_analytics(
 @app.get("/api/developers/{github_username}/dora", response_model=DeveloperDoraMetricsResponse)
 def developer_dora_metrics(
     github_username: str,
-    days: int = WindowDays,
+    window: TimeWindow = Depends(time_window),
     branches: list[str] | None = Depends(target_branches),
     db: Session = Depends(get_db),
 ):
-    metrics = get_developer_dora_metrics(db, github_username, window_days=days, branches=branches)
+    metrics = get_developer_dora_metrics(db, github_username, window=window, branches=branches)
     if metrics is None:
         raise HTTPException(status_code=404, detail="Developer not found")
     return metrics
@@ -587,14 +632,14 @@ def developer_dora_metrics(
 @app.get("/api/chart/pr-cycle-by-developer", response_model=list[PrCycleByDeveloperItem])
 def chart_pr_cycle_by_developer(
     team: str | None = None,
-    days: int = WindowDays,
+    window: TimeWindow = Depends(time_window),
     branches: list[str] | None = Depends(target_branches),
     db: Session = Depends(get_db),
 ):
     team_config = load_team_config()
     return [
         {**row, "label": team_config.display_name(row["developer"])}
-        for row in get_pr_cycle_time_by_developer(db, days=days, teams=_resolve_teams(team), branches=branches)
+        for row in get_pr_cycle_time_by_developer(db, window=window, teams=_resolve_teams(team), branches=branches)
     ]
 
 
@@ -603,22 +648,22 @@ def chart_prs_per_week(
     db: Session = Depends(get_db),
     developer: str | None = None,
     team: str | None = None,
-    days: int = WindowDays,
+    window: TimeWindow = Depends(time_window),
     branches: list[str] | None = Depends(target_branches),
 ):
-    return get_prs_per_week(db, developer=developer, days=days, teams=_resolve_teams(team), branches=branches)
+    return get_prs_per_week(db, developer=developer, window=window, teams=_resolve_teams(team), branches=branches)
 
 
-def _background_ingest(lookback_days: int = 7, full_refresh: bool = False):
+def _background_ingest(window: TimeWindow, full_refresh: bool = False):
     """Run ingestion in a background thread with its own DB session.
 
     The caller must hold ``_ingestion_lock``; it is released when the run ends.
     """
     global _last_ingestion
     db = SessionLocal()
-    result: dict = {"lookback_days": lookback_days}
+    result: dict = {"range": window.describe()}
     try:
-        stats = run_ingestion(db, lookback_days=lookback_days, full_refresh=full_refresh)
+        stats = run_ingestion(db, since=window.start, until=window.end, full_refresh=full_refresh)
         result.update(stats.as_dict())
         if settings.snapshot_after_sync:
             try:
@@ -648,17 +693,23 @@ def trigger_ingest(
     background_tasks: BackgroundTasks,
     payload: IngestRequest = Body(default_factory=IngestRequest),
 ):
-    """Trigger GitHub data ingestion into Postgres (runs in background)."""
-    if payload.lookback_days < 1:
-        raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
+    """Trigger GitHub data ingestion into Postgres (runs in background).
+
+    Fetches PRs updated in ``[date_from, date_to)`` (or the last ``lookback_days`` days).
+    """
+    window = _sync_range(payload.date_from, payload.date_to, payload.lookback_days)
     if not _ingestion_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="An ingestion run is already in progress.")
 
-    background_tasks.add_task(_background_ingest, payload.lookback_days, payload.full_refresh)
+    background_tasks.add_task(_background_ingest, window, payload.full_refresh)
     return IngestStatusResponse(
         status="accepted",
-        message=f"Ingestion started in the background for PRs updated in the last {payload.lookback_days} days.",
+        message=f"Ingestion started in the background for PRs updated {_describe_range(window)}.",
     )
+
+
+def _describe_range(window: TimeWindow) -> str:
+    return f"between {window.start:%Y-%m-%d %H:%M} and {window.end:%Y-%m-%d %H:%M} UTC"
 
 
 @app.get("/api/snapshots", response_model=SnapshotListResponse)
@@ -713,8 +764,8 @@ def restore_snapshot(
 
 
 def _story_filters(
-    date_from: date | None,
-    date_to: date | None,
+    date_from: str | None,
+    date_to: str | None,
     tags: list[str],
     tag_mode: str,
     person: str | None,
@@ -722,11 +773,10 @@ def _story_filters(
     types: list[str],
     status: str,
 ) -> StoryFilters:
-    today = datetime.now(timezone.utc).date()
-    end = date_to or today
-    start = date_from or end - timedelta(days=29)
-    if start > end:
-        raise HTTPException(status_code=400, detail="date_from must be on or before date_to")
+    try:
+        window = TimeWindow.parse(date_from, date_to, default_days=30)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date range: {exc}") from exc
     if tag_mode not in ("any", "all"):
         raise HTTPException(status_code=400, detail="tag_mode must be 'any' or 'all'")
     if status not in ("completed", "all"):
@@ -734,8 +784,9 @@ def _story_filters(
     if team:
         _resolve_teams(team)  # 404 for unknown teams
     return StoryFilters(
-        date_from=start,
-        date_to=end,
+        date_from=window.start.date(),
+        date_to=(window.end - timedelta(microseconds=1)).date(),
+        window=window,
         tags=[tag for tag in tags if tag],
         tag_mode=tag_mode,
         person=person or None,
@@ -746,8 +797,8 @@ def _story_filters(
 
 
 def story_filters(
-    date_from: date | None = Query(None, description="Start of the date range (default: 30 days ago)"),
-    date_to: date | None = Query(None, description="End of the date range, inclusive (default: today)"),
+    date_from: str | None = Query(None, description="Start: ISO date or date-time, UTC unless an offset is given (default: 30 days ago)"),
+    date_to: str | None = Query(None, description="End: exclusive date-time, or a whole date (default: now)"),
     tags: list[str] = Query(default=[], description="Work item tags; repeat the parameter for several"),
     tag_mode: str = Query("any", description="'any' or 'all' of the tags"),
     person: str | None = Query(None, description="GitHub login of a configured member, or an Azure identity"),
@@ -777,13 +828,13 @@ def devops_config(db: Session = Depends(get_db)):
     }
 
 
-def _background_devops_sync(lookback_days: int) -> None:
+def _background_devops_sync(window: TimeWindow) -> None:
     """Run the Azure DevOps sync; the caller holds ``_ingestion_lock``."""
     global _last_devops_sync
     db = SessionLocal()
-    result: dict = {"lookback_days": lookback_days}
+    result: dict = {"range": window.describe()}
     try:
-        result.update(run_devops_ingestion(db, lookback_days=lookback_days).as_dict())
+        result.update(run_devops_ingestion(db, since=window.start, until=window.end).as_dict())
         if settings.snapshot_after_sync:
             try:
                 result["snapshot"] = save_snapshot(db, settings.snapshot_dir)["name"]
@@ -804,18 +855,17 @@ def devops_sync(
     background_tasks: BackgroundTasks,
     payload: DevOpsSyncRequest = Body(default_factory=DevOpsSyncRequest),
 ):
-    """Fetch Azure Boards work items and Azure Pipelines runs changed in the last N days."""
+    """Fetch Azure Boards work items and Azure Pipelines runs changed in ``[date_from, date_to)``."""
     config = load_devops_config()
     if not config.configured:
         raise HTTPException(status_code=400, detail="Azure DevOps is not configured: missing " + ", ".join(config.missing()))
-    if payload.lookback_days < 1:
-        raise HTTPException(status_code=400, detail="lookback_days must be at least 1")
+    window = _sync_range(payload.date_from, payload.date_to, payload.lookback_days)
     if not _ingestion_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A sync is already in progress.")
-    background_tasks.add_task(_background_devops_sync, payload.lookback_days)
+    background_tasks.add_task(_background_devops_sync, window)
     return IngestStatusResponse(
         status="accepted",
-        message=f"Azure DevOps sync started for items changed in the last {payload.lookback_days} days.",
+        message=f"Azure DevOps sync started for items changed {_describe_range(window)}.",
     )
 
 
@@ -868,6 +918,7 @@ def devops_dora(
         person=filters.person,
         team=filters.team,
         branches=branches,
+        window=filters.bounds,
     )
 
 
@@ -899,6 +950,7 @@ def devops_report(
         person=filters.person,
         team=filters.team,
         branches=branches,
+        window=filters.bounds,
     )
     report = markdown_report(
         filters,

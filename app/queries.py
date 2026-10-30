@@ -1,13 +1,23 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
-from sqlalchemy import func, or_, select, true
+from sqlalchemy import and_, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from app.models import Commit, Developer, PullRequest, Repository
+from app.time_window import TimeWindow
 
 
-def _utc_now_naive() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def active_in_window(window: TimeWindow):
+    """Filter clause: PRs created or merged inside ``window``."""
+    return or_(
+        and_(PullRequest.created_at >= window.start, PullRequest.created_at < window.end),
+        and_(PullRequest.merged_at >= window.start, PullRequest.merged_at < window.end),
+    )
+
+
+def merged_in_window(window: TimeWindow):
+    """Filter clause: PRs merged inside ``window``."""
+    return and_(PullRequest.merged_at >= window.start, PullRequest.merged_at < window.end)
 
 
 def in_branches(branches: list[str] | None):
@@ -43,9 +53,10 @@ def get_team_performance_metrics(
     days: int = 30,
     teams: list[str] | None = None,
     branches: list[str] | None = None,
+    window: TimeWindow | None = None,
 ):
-    """Return team-level metrics for pull requests created or merged in the last N days."""
-    since = _utc_now_naive() - timedelta(days=days)
+    """Return team-level metrics for pull requests created or merged in ``window`` (default: last N days)."""
+    window = window or TimeWindow.last_days(days)
     team_name = func.coalesce(Developer.team_name, "Unassigned").label("team_name")
 
     pr_aggregates = (
@@ -56,7 +67,7 @@ def get_team_performance_metrics(
         )
         .join(Developer, PullRequest.developer_id == Developer.id)
         .where(
-            or_(PullRequest.created_at >= since, PullRequest.merged_at >= since),
+            active_in_window(window),
             _in_teams(teams),
             in_branches(branches),
         )
@@ -73,7 +84,7 @@ def get_team_performance_metrics(
         .join(PullRequest, Commit.pr_id == PullRequest.id)
         .join(Developer, PullRequest.developer_id == Developer.id)
         .where(
-            or_(PullRequest.created_at >= since, PullRequest.merged_at >= since),
+            active_in_window(window),
             _in_teams(teams),
             in_branches(branches),
         )
@@ -164,16 +175,17 @@ def get_pr_cycle_time_by_developer(
     days: int = 30,
     teams: list[str] | None = None,
     branches: list[str] | None = None,
+    window: TimeWindow | None = None,
 ):
-    """Return average PR cycle time (hours) per developer for PRs merged in the last N days."""
-    since = _utc_now_naive() - timedelta(days=days)
+    """Return average PR cycle time (hours) per developer for PRs merged in ``window`` (default: last N days)."""
+    window = window or TimeWindow.last_days(days)
     stmt = (
         select(
             Developer.github_username.label("developer"),
             (func.avg(PullRequest.cycle_time_minutes) / 60).label("cycleTimeHours"),
         )
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .where(PullRequest.merged_at >= since)
+        .where(merged_in_window(window))
         .where(PullRequest.cycle_time_minutes.is_not(None))
         .where(_in_teams(teams), in_branches(branches))
         .group_by(Developer.github_username)
@@ -192,16 +204,16 @@ def get_prs_per_week(
     days: int = 42,
     teams: list[str] | None = None,
     branches: list[str] | None = None,
+    window: TimeWindow | None = None,
 ):
-    """Return merged PR count per ISO week label for PRs merged in the last N days."""
-    since = _utc_now_naive() - timedelta(days=days)
+    """Return merged PR count per ISO week label for PRs merged in ``window`` (default: last N days)."""
+    window = window or TimeWindow.last_days(days)
 
     stmt = (
         select(PullRequest.merged_at)
         .join(Developer, PullRequest.developer_id == Developer.id)
         .where(
-            PullRequest.merged_at >= since,
-            PullRequest.merged_at.is_not(None),
+            merged_in_window(window),
             _in_teams(teams),
             in_branches(branches),
         )
@@ -228,7 +240,12 @@ def get_prs_per_week(
     return [{"week": w, "mergedPrs": c} for w, c in sorted_weeks]
 
 
-def get_target_branches(db: Session, days: int | None = None, teams: list[str] | None = None) -> dict:
+def get_target_branches(
+    db: Session,
+    days: int | None = None,
+    teams: list[str] | None = None,
+    window: TimeWindow | None = None,
+) -> dict:
     """Target (base) branches of stored PRs with PR counts, most used first.
 
     ``unknown`` counts PRs synced before the base branch was recorded (a GitHub
@@ -240,9 +257,10 @@ def get_target_branches(db: Session, days: int | None = None, teams: list[str] |
         .where(_in_teams(teams))
         .group_by(PullRequest.base_branch)
     )
-    if days:
-        since = _utc_now_naive() - timedelta(days=days)
-        stmt = stmt.where(or_(PullRequest.created_at >= since, PullRequest.merged_at >= since))
+    if window is None and days:
+        window = TimeWindow.last_days(days)
+    if window is not None:
+        stmt = stmt.where(active_in_window(window))
     branches, unknown = [], 0
     for branch, count in db.execute(stmt).all():
         if branch is None:

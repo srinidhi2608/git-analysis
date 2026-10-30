@@ -14,8 +14,19 @@ import {
 } from "recharts";
 import BranchSelect, { type BranchOption } from "./BranchSelect";
 import DevOpsIntegrationPage from "./DevOpsIntegrationPage";
+import DateTimeRangePicker from "./DateTimeRangePicker";
+import { type DateRange, defaultRange, rangeShortLabel, rangeToApi, readStoredRange, storeRange } from "./dateRange";
 
 const BRANCH_STORAGE_KEY = "git-analysis.target-branches";
+const RANGE_STORAGE_KEY = "git-analysis.date-range";
+
+/** "Sep 1, 09:00 – Oct 1, 09:00" for the range the metrics cover (local time). */
+function formatWindow(summary: DoraSummary): string {
+  if (!summary.window_start || !summary.window_end) return `${summary.window_days} days`;
+  const format = (iso: string) =>
+    new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return `${format(summary.window_start)} – ${format(summary.window_end)}`;
+}
 
 function readStoredBranches(): string[] {
   try {
@@ -91,7 +102,7 @@ interface SnapshotListResponse {
 }
 
 interface IngestRunStats {
-  lookback_days?: number;
+  range?: { start: string; end: string; days: number };
   upserted?: number;
   unchanged?: number;
   github_requests?: number;
@@ -117,6 +128,8 @@ interface TeamPerformance {
 
 interface DoraSummary {
   window_days: number;
+  window_start?: string;
+  window_end?: string;
   pull_request_count: number;
   merged_pull_request_count: number;
   reviewed_pull_request_count: number;
@@ -389,7 +402,7 @@ function DoraMetricsPanel({
           <p className="mt-2 text-sm text-slate-300">{subtitle}</p>
         </div>
         <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300">
-          Last {metrics.window_days} days
+          {formatWindow(metrics)}
         </span>
       </div>
 
@@ -977,9 +990,9 @@ export default function GitAnalyticsDashboard() {
   const [unknownBranchPrs, setUnknownBranchPrs] = useState(0);
   const branchParams = selectedBranches.map((branch) => `branches=${encodeURIComponent(branch)}`).join("&");
   const [teams, setTeams] = useState<TeamItem[]>([]);
-  const [lookbackDays, setLookbackDays] = useState<number>(7);
-  // Lookback applied to the dashboard; follows `lookbackDays` after typing pauses.
-  const [windowDays, setWindowDays] = useState<number>(7);
+  // Date/time range for every page and for Sync. Remembered per browser.
+  const [dateRange, setDateRange] = useState<DateRange>(() => readStoredRange(RANGE_STORAGE_KEY, defaultRange("30d")));
+  const rangeKey = JSON.stringify(dateRange);
   const [fullRefresh, setFullRefresh] = useState(false);
   const [snapshotInfo, setSnapshotInfo] = useState<SnapshotListResponse | null>(null);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
@@ -1031,12 +1044,6 @@ export default function GitAnalyticsDashboard() {
     [],
   );
 
-  useEffect(() => {
-    const days = Math.min(Math.max(Math.round(lookbackDays) || 7, 1), 365);
-    const timer = setTimeout(() => setWindowDays(days), 500);
-    return () => clearTimeout(timer);
-  }, [lookbackDays]);
-
   const loadSnapshots = useCallback(async () => {
     try {
       setSnapshotInfo(await apiFetch<SnapshotListResponse>("/api/snapshots"));
@@ -1055,7 +1062,9 @@ export default function GitAnalyticsDashboard() {
     setTeamLoading(true);
     setTeamDoraError("");
     try {
-      const params = new URLSearchParams({ days: String(windowDays) });
+      // Rolling presets ("last 30 days") are resolved at load time.
+      const range = rangeToApi(dateRange);
+      const params = new URLSearchParams(range);
       selectedBranches.forEach((branch) => params.append("branches", branch));
       if (selectedTeam) params.set("team", selectedTeam);
       const teamQuery = `?${params}`;
@@ -1069,7 +1078,7 @@ export default function GitAnalyticsDashboard() {
         apiFetch<TeamsResponse>("/api/teams", signal),
       ]);
       const branchList = await apiFetch<{ branches: BranchOption[]; unknown: number }>(
-        `/api/branches?days=${windowDays}${selectedTeam ? `&team=${encodeURIComponent(selectedTeam)}` : ""}`,
+        `/api/branches?${new URLSearchParams({ ...range, ...(selectedTeam ? { team: selectedTeam } : {}) })}`,
         signal,
       );
       setBranchOptions(branchList.branches);
@@ -1095,9 +1104,9 @@ export default function GitAnalyticsDashboard() {
     } finally {
       if (teamAbortRef.current === controller) setTeamLoading(false);
     }
-  }, [selectedDeveloper, selectedTeam, windowDays, selectedBranches]);
+  }, [selectedDeveloper, selectedTeam, dateRange, selectedBranches]);
 
-  /** Charts and DORA: quick database queries that depend on the lookback window. */
+  /** Charts and DORA: quick database queries that depend on the date range. */
   const loadIndividualQuick = useCallback(
     async (dev: string) => {
       quickAbortRef.current?.abort();
@@ -1116,12 +1125,13 @@ export default function GitAnalyticsDashboard() {
       }
       setIndivLoading(true);
       const encoded = encodeURIComponent(dev);
-      const branchSuffix = branchParams ? `&${branchParams}` : "";
+      const rangeQuery = new URLSearchParams(rangeToApi(dateRange)).toString();
+      const suffix = branchParams ? `${rangeQuery}&${branchParams}` : rangeQuery;
       try {
         const [prsWeek, cycleTime, dora] = await Promise.all([
-          apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week?developer=${encoded}&days=${windowDays}${branchSuffix}`, signal),
-          apiFetch<PrCycleItem[]>(`/api/chart/pr-cycle-by-developer?days=${windowDays}${branchSuffix}`, signal),
-          apiFetch<DeveloperDoraMetricsResponse>(`/api/developers/${encoded}/dora?days=${windowDays}${branchSuffix}`, signal),
+          apiFetch<PrsPerWeekItem[]>(`/api/chart/prs-per-week?developer=${encoded}&${suffix}`, signal),
+          apiFetch<PrCycleItem[]>(`/api/chart/pr-cycle-by-developer?${suffix}`, signal),
+          apiFetch<DeveloperDoraMetricsResponse>(`/api/developers/${encoded}/dora?${suffix}`, signal),
         ]);
         if (!isCurrent()) return;
         setIndivPrsPerWeek(prsWeek);
@@ -1134,10 +1144,10 @@ export default function GitAnalyticsDashboard() {
         if (isCurrent()) setIndivLoading(false);
       }
     },
-    [windowDays, branchParams],
+    [dateRange, branchParams],
   );
 
-  /** AI review analytics (may call an LLM); independent of the lookback window. */
+  /** AI review analytics (may call an LLM); independent of the date range. */
   const loadIndividualAnalytics = useCallback(async (dev: string) => {
     analyticsAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1179,7 +1189,7 @@ export default function GitAnalyticsDashboard() {
   /**
    * Reloads team data and, on the Individual tab, the selected developer's data.
    * ``includeAnalytics`` re-runs the LLM-backed analytics too (Refresh / Sync);
-   * lookback and team changes only reload the window-dependent queries.
+   * date range and team changes only reload the range-dependent queries.
    */
   const refreshData = useCallback(
     async (includeAnalytics = true) => {
@@ -1203,11 +1213,16 @@ export default function GitAnalyticsDashboard() {
     [activeTab, loadTeamData, loadIndividualData, loadIndividualQuick, selectedDeveloper],
   );
 
-  // Initial load, and reload whenever the selected team, lookback window or target branches change.
+  // Initial load, and reload whenever the selected team, date range or target branches change.
   useEffect(() => {
     refreshData(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTeam, windowDays, branchParams]);
+  }, [selectedTeam, rangeKey, branchParams]);
+
+  const handleRangeChange = (range: DateRange) => {
+    setDateRange(range);
+    storeRange(RANGE_STORAGE_KEY, range);
+  };
 
   // The developer analytics depend on the target branches too: reload them on the
   // Individual tab, or the next time it is opened.
@@ -1241,7 +1256,7 @@ export default function GitAnalyticsDashboard() {
       const res = await fetch("/api/ingest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lookback_days: Number(lookbackDays) || 7, full_refresh: fullRefresh }),
+        body: JSON.stringify({ ...rangeToApi(dateRange), full_refresh: fullRefresh }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1340,7 +1355,7 @@ export default function GitAnalyticsDashboard() {
       loading: teamLoading,
     },
     {
-      label: `PRs Merged (${windowDays}d)`,
+      label: `PRs Merged (${rangeShortLabel(dateRange)})`,
       value: (teamDoraMetrics?.summary.merged_pull_request_count ?? 0).toString(),
       loading: teamLoading,
     },
@@ -1380,22 +1395,7 @@ export default function GitAnalyticsDashboard() {
               <p className="mt-1 text-sm text-slate-400">Track pull request throughput and cycle time trends.</p>
             </div>
             <div className="flex flex-col items-end gap-3 sm:flex-row sm:items-center">
-              <label
-                className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
-                title="Days of PR activity shown on the dashboard and fetched by Sync"
-              >
-                <span>Lookback</span>
-                <input
-                  aria-label="Lookback days"
-                  className="w-16 rounded-md border border-slate-600 bg-slate-900 px-2 py-1 text-right text-slate-100 focus:outline-none"
-                  max={365}
-                  min={1}
-                  onChange={(event) => setLookbackDays(Number(event.target.value) || 7)}
-                  type="number"
-                  value={lookbackDays}
-                />
-                <span className="text-xs uppercase tracking-wide text-slate-400">days</span>
-              </label>
+              <DateTimeRangePicker label="Date range" onChange={handleRangeChange} value={dateRange} />
               <button
                 className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:opacity-50"
                 disabled={syncing}
@@ -1445,7 +1445,7 @@ export default function GitAnalyticsDashboard() {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-slate-800 pt-4 text-sm text-slate-400">
-            <label className="flex items-center gap-2" title="Re-download every PR in the lookback window, even unchanged ones">
+            <label className="flex items-center gap-2" title="Re-download every PR in the date range, even unchanged ones">
               <input
                 checked={fullRefresh}
                 className="h-4 w-4 accent-emerald-500"
@@ -1488,7 +1488,9 @@ export default function GitAnalyticsDashboard() {
         {activeTab === "devops" ? (
           <DevOpsIntegrationPage
             branchOptions={branchOptions}
+            dateRange={dateRange}
             onBranchesChange={handleBranchesChange}
+            onDateRangeChange={handleRangeChange}
             selectedBranches={selectedBranches}
             unknownBranchPrs={unknownBranchPrs}
           />

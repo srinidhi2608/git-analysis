@@ -158,6 +158,8 @@ def run_ingestion(
     lookback_days: int = 7,
     config_path: str = "config.yaml",
     full_refresh: bool = False,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> IngestionStats:
     """Fetch GitHub PR data and persist it to the database.
 
@@ -173,6 +175,8 @@ def run_ingestion(
         lookback_days=lookback_days,
         team_config=team_config,
         known_updated_at=None if full_refresh else _known_updated_at(db),
+        since=since,
+        until=until,
     )
     prs = service.fetch_all()
     logger.info("Fetched %d pull requests from GitHub.", len(prs))

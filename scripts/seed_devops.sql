@@ -146,3 +146,26 @@ FROM (
   SELECT d, date_trunc('day', now() AT TIME ZONE 'UTC') - make_interval(days => d) AS day
   FROM generate_series(1, 42) AS d
 ) days;
+
+-- Runs people started themselves (manual hotfix deploys, builds of their own
+-- pushes) from an Azure Repos mirror named just "platform". Filtering the
+-- DevOps page by a person includes them through "Requested for".
+INSERT INTO azure_pipeline_runs (
+  project, build_id, build_number, definition_id, definition_name, status, result, reason,
+  source_branch, source_version, repository_name, repository_type, requested_for, requested_for_email,
+  queue_time, start_time, finish_time, url
+)
+SELECT 'Platform', 5300 + n, 'person.' || n,
+       CASE WHEN n % 3 = 0 THEN 12 ELSE 13 END,
+       CASE WHEN n % 3 = 0 THEN 'Platform - Deploy Prod Hotfix' ELSE 'Platform - Feature Build' END,
+       'completed', CASE WHEN n % 4 = 0 THEN 'failed' ELSE 'succeeded' END,
+       CASE WHEN n % 3 = 0 THEN 'manual' ELSE 'individualCI' END,
+       'refs/heads/feature/demo-' || n, 'demo-person-' || n, 'platform', 'TfsGit',
+       (ARRAY['Alice Anderson', 'Bob Brown', 'Carol Chen', 'Tom QA'])[1 + n % 4],
+       (ARRAY['alice@acme.dev', 'bob@acme.dev', 'carol@acme.dev', 'tom@acme.dev'])[1 + n % 4],
+       day + interval '12 hours', day + interval '12 hours 3 minutes', day + interval '12 hours 20 minutes',
+       'https://dev.azure.com/acme/Platform/_build/results?buildId=' || (5300 + n)
+FROM (
+  SELECT n, date_trunc('day', now() AT TIME ZONE 'UTC') - make_interval(days => n * 3) AS day
+  FROM generate_series(1, 12) AS n
+) runs;

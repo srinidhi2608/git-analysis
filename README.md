@@ -131,7 +131,7 @@ The first build takes a few minutes. When you see `Uvicorn running on http://0.0
 
 ### Step 6: Load data
 
-The dashboard starts empty. Click **⟳ Sync from GitHub** in the header. The button stays in "Syncing…" until ingestion finishes, then the dashboard reloads and shows how many PRs were updated and how many GitHub API requests were used. The **Lookback** field sets both how many days of PR activity Sync imports (for example 30 or 90 for a first import) and the window the dashboard shows.
+The dashboard starts empty. Click **⟳ Sync from GitHub** in the header. The button stays in "Syncing…" until ingestion finishes, then the dashboard reloads and shows how many PRs were updated and how many GitHub API requests were used. The **date range** picker next to it sets both which PR activity Sync imports (for example **Last 90 days** for a first import) and the period the dashboard shows. See [4.6](#46-choose-a-date-and-time-range).
 
 After each sync the data is also saved as a [snapshot](#44-snapshots-keep-data-without-re-fetching) in `./snapshots`, so it comes back automatically even after `docker compose down -v` or a rebuild.
 
@@ -247,18 +247,20 @@ Each member is **one person**, who often has different names in GitHub and Azure
 
 ### 4.1 Sync from GitHub (UI)
 
-Click **⟳ Sync from GitHub**. Ingestion imports every PR (open, closed or merged) that was **updated within the Lookback window**, for all active repositories, limited to team members if `teams` is configured. That includes its reviews, review comments, PR comments and commits. Re-running is safe: existing rows are updated, never duplicated. Only one sync runs at a time; a second request while one is running gets `409 Conflict`.
+Click **⟳ Sync from GitHub**. Ingestion imports every PR (open, closed or merged) that was **updated within the selected date range**, for all active repositories, limited to team members if `teams` is configured. That includes its reviews, review comments, PR comments and commits. Re-running is safe: existing rows are updated, never duplicated. Only one sync runs at a time; a second request while one is running gets `409 Conflict`.
 
 **Re-syncs are incremental.** Each stored PR remembers GitHub's `updatedAt`. On the next sync, PRs whose `updatedAt` hasn't changed are not downloaded again; only new or changed PRs are fetched and upserted. The sync message and the log report the numbers, for example `Sync complete: 3 PR(s) updated, 41 unchanged (not downloaded again), 2 GitHub API request(s)`.
 
-Tick **Full refresh on sync** (or send `"full_refresh": true`) to download every PR in the window again. You need this after adding a new member to `teams`: their reviews on PRs that are already stored are only picked up when those PRs are re-downloaded.
+Tick **Full refresh on sync** (or send `"full_refresh": true`) to download every PR in the range again. You need this after adding a new member to `teams`: their reviews on PRs that are already stored are only picked up when those PRs are re-downloaded.
 
 ### 4.2 Sync from the command line
 
 ```bash
 curl -X POST http://localhost:8000/api/ingest \
   -H "Content-Type: application/json" \
-  -d '{"lookback_days": 30}'          # add "full_refresh": true to re-download everything
+  -d '{"date_from": "2026-09-01T00:00:00Z", "date_to": "2026-10-01T00:00:00Z"}'
+# add "full_refresh": true to re-download everything; omit date_to for "until now";
+# {"lookback_days": 30} (the last 30 days) still works too
 
 # Poll until it reports "idle"; "last_run" holds the statistics of the last sync
 curl http://localhost:8000/api/ingest/status
@@ -311,6 +313,18 @@ PRs are often merged into several branches (`main`, `develop`, `release/*`, hotf
 It applies to the cards, DORA metrics, charts, developer review analytics, and the lead time on the DevOps page. API: add `?branches=main&branches=develop` to the PR-based endpoints (section 9).
 
 The target branch is recorded when PRs are synced. PRs synced before this feature have no target branch until you sync once with **Full refresh on sync**. Until then they are excluded whenever a branch is selected, and the dropdown shows how many PRs that affects.
+
+### 4.6 Choose a date and time range
+
+The **date range** picker in the header replaces the old "Lookback days" field. One range drives every page, and both sync buttons:
+
+- **Presets:** Last 24 hours, Last 7 / 14 / 30 / 90 days, This month, Last month. Presets roll forward: "Last 30 days" always means the 30 days up to now.
+- **Custom range:** pick a start and end **date and time**, then **Apply**. Times are in your browser's time zone and are sent to the API in UTC.
+- **What it filters:** Team Overview and Individual Performance count PRs **created or merged** in the range (merge-based figures count PRs **merged** in it). The DevOps Integration page uses it for work items and pipeline runs.
+- **What Sync fetches:** **⟳ Sync from GitHub** imports PRs **updated** in the range, and **⟳ Sync Azure DevOps** imports work items changed and pipeline runs finished in it. Ranges are end-exclusive.
+- The range is remembered in your browser.
+
+API: `date_from` / `date_to` take an ISO date (`2026-10-01`, a whole day) or a date-time (`2026-10-01T09:30:00Z`, or with an offset such as `+05:30`; no offset means UTC). See section 9.
 
 ---
 
@@ -443,7 +457,8 @@ It is modelled on [Apache DevLake](https://github.com/apache/devlake)'s Azure De
 | Section | What you get |
 |---|---|
 | **Filters** | Date range (with 7/30/90-day shortcuts), team, developer/tester, work item types, **tags** (any or all of the selected tags), and finished-only or finished + open items. Every section below follows the filters. |
-| **DORA metrics** | Deployment frequency, lead time for changes, change failure rate and failed deployment recovery time, each with its **Elite / High / Medium / Low** level, plus a weekly chart of deployments and lead time. With a person or team selected, the metrics are computed for the deployments that shipped **their** pull requests. |
+| **DORA metrics** | Deployment frequency, lead time for changes, change failure rate and failed deployment recovery time, each with its **Elite / High / Medium / Low** level, plus a weekly chart of deployments and lead time. With a person or team selected, the metrics use **their** pipeline runs (see 7.4). |
+| **Pipeline runs** | Every run behind the numbers, with result, repository, branch and *Requested for*. With a person or team selected, a *Why it is included* column shows how each run was attributed (requested for them, built or validated their PR, or shipped their PR). Tick **Production deployments only** to narrow it. Also in the Markdown report. |
 | **Story summary** | Items finished, story points, throughput per week, median cycle time (active → closed), median lead time (created → closed), GitHub PRs linked via `AB#`. |
 | **Efficiency by developer / tester** | Per person, in the date range: work items finished, story points, median cycle time, items per week, share of the team's finished items, **bugs reported** (useful for testers) and GitHub PRs merged. Click a row to see that person's DORA metrics. |
 | **Work items** | The filtered stories with links to Azure Boards, tags, points, closed date, cycle time and linked PRs. |
@@ -507,7 +522,7 @@ Matching order for an Azure identity:
 
 Across all pages, filters and reports show the `name`. The underlying data still uses the GitHub login, so a person's GitHub PRs and Azure work items are counted together: in their efficiency row, in "PRs merged", and in their person-level DORA metrics.
 
-As with GitHub data, when `teams` is configured only work items **assigned to or created by** listed members are stored, and everyone else is logged as `not in any team: ...`. Pipeline runs are not person-specific and are always stored.
+As with GitHub data, when `teams` is configured only work items **assigned to or created by** listed members are stored, and everyone else is logged as `not in any team: ...`. All pipeline runs are stored; a run's **Requested for** identity is matched to people the same way, so runs someone started count for them (section 7.4).
 
 **Step 5: Restart and sync**
 
@@ -515,17 +530,18 @@ As with GitHub data, when `teams` is configured only work items **assigned to or
 docker compose up -d --build     # or restart the backend
 ```
 
-Open **DevOps Integration** and click **⟳ Sync Azure DevOps**. Choose how many days back to fetch; 90 is a good first sync. The sync fetches:
+Open **DevOps Integration**, choose a date range in the header (**Last 90 days** is a good first sync) and click **⟳ Sync Azure DevOps**. The sync fetches:
 
-- work items of the configured types **changed** in that window (WIQL + `workitemsbatch`, 200 at a time)
-- **completed** pipeline runs finished in that window (Builds API, paged)
+- work items of the configured types **changed** in that range (WIQL with time precision + `workitemsbatch`, 200 at a time)
+- **completed** pipeline runs finished in that range (Builds API `minTime`/`maxTime`, paged)
 
 Re-syncing updates existing rows. The data is included in snapshots (section 4.4).
 
 From the command line:
 
 ```bash
-curl -X POST http://localhost:8000/api/devops/sync -H "Content-Type: application/json" -d '{"lookback_days": 90}'
+curl -X POST http://localhost:8000/api/devops/sync -H "Content-Type: application/json" \
+  -d '{"date_from": "2026-08-01T00:00:00Z", "date_to": "2026-11-01T00:00:00Z"}'
 curl http://localhost:8000/api/devops/sync/status
 ```
 
@@ -540,7 +556,7 @@ curl http://localhost:8000/api/devops/sync/status
 docker compose exec db psql -U git_user -d git_analysis -f /scripts/seed_devops.sql
 ```
 
-This adds 22 work items (stories, testing tasks, bugs and 2 incidents) and about 70 pipeline runs for the last 6 weeks. It also links the sample PRs to stories with `AB#` and fills the DevOps Integration page. Without a PAT the page shows "Not configured", but the stored demo data is still displayed. To see roles and the per-person view, use the `teams` example at the top of `scripts/seed_devops.sql`.
+This adds 22 work items (stories, testing tasks, bugs and 2 incidents) and about 70 pipeline runs for the last 6 weeks. It also links the sample PRs to stories with `AB#`, adds runs that people started themselves from an Azure Repos mirror named `platform`, and fills the DevOps Integration page. Without a PAT the page shows "Not configured", but the stored demo data is still displayed. To see roles and the per-person view, use the `teams` example at the top of `scripts/seed_devops.sql`.
 
 ### 7.4 How the DORA metrics are calculated
 
@@ -556,9 +572,14 @@ The definitions follow Apache DevLake (`backend/plugins/dora`), and the levels u
 The underlying rules:
 
 - **Deployments:** completed runs of pipelines whose name matches `deployment_pattern`, and `production_pattern` if set. `succeeded` and `partiallySucceeded` count as success; `failed`, `canceled` and `none` count as failure. These are DevLake's Azure DevOps mappings.
-- **Which deployment shipped a PR:** the successful production deployment whose commit equals the PR's merge commit. Otherwise it's the first successful production deployment of the same repository after the merge. Azure Pipelines reports GitHub repositories as `owner/repo`, which matches `config.yaml`.
+- **Which deployment shipped a PR:** the successful production deployment whose commit equals the PR's merge commit. Otherwise it's the first successful production deployment of the same repository after the merge. Repositories match as `owner/repo` (how Azure Pipelines names GitHub repositories) or by the bare name (`repo`, how Azure Repos and mirrors name them).
 - **Incidents:** work items matching `incidents` (type and/or tag). As in DevLake, each incident is attributed to the **last successful production deployment before it was created**.
-- **Person / team scope:** the same metrics, restricted to deployments that shipped that person's or team's PRs. Change failure rate then uses each PR's first deployment attempt after the merge.
+- **Person / team scope:** a pipeline run belongs to a person (or to a team's members) when **any** of these is true:
+  1. it was **requested for** them in Azure Pipelines (manual runs, their pushes), matched through `azure_devops`, display name or GitHub login in `teams`;
+  2. it **built** the merge commit or one of the commits of their PR, or **validated** their PR (`refs/pull/<n>/merge`);
+  3. it is the deployment that **shipped** their PR (rule above).
+
+  Deployment frequency counts their successful production deployments. Change failure rate uses their production deployment attempts (plus each PR's first attempt after the merge), and lead time uses their PRs. Testers without a GitHub account are covered by rule 1.
 - **Stories:** cycle time is *Activated → Closed* (Created → Closed if never activated); lead time is *Created → Closed*. "Finished in range" means the *Closed* date is in the range.
 
 **Sources:** the [DevLake GitHub data source demo](https://devlake.apache.org/livedemo/DataSources/GitHub/), [DevLake source code](https://github.com/apache/devlake), and [Atlassian's overview of DORA metrics](https://www.atlassian.com/devops/frameworks/dora-metrics).
@@ -675,25 +696,25 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/developers/{username}/dora` | DORA-inspired metrics for one developer |
 | GET | `/api/chart/pr-cycle-by-developer` | Avg cycle time per developer |
 | GET | `/api/chart/prs-per-week` | Merged PRs per ISO week; optional `?developer=<username>` |
-| POST | `/api/ingest` | Start a GitHub sync in the background. Body: `{"lookback_days": 7, "full_refresh": false}`. Returns `202`, or `409` if one is already running |
+| POST | `/api/ingest` | Start a GitHub sync in the background for PRs updated in a range. Body: `{"date_from": "<ISO>", "date_to": "<ISO>", "full_refresh": false}` (or `{"lookback_days": 7}`). Returns `202`, `400` for an invalid range, or `409` if one is already running |
 | GET | `/api/ingest/status` | `running` or `idle`, plus `last_run` statistics (PRs updated, unchanged, GitHub requests, snapshot saved) |
 | GET | `/api/snapshots` | Saved snapshots, newest first |
 | POST | `/api/snapshots` | Save a snapshot of the current data |
-| GET | `/api/branches` | Target branches of stored PRs with PR counts (`?days=`, `?team=`), plus PRs with no recorded branch |
+| GET | `/api/branches` | Target branches of stored PRs with PR counts (`?date_from=`/`?date_to=`, `?team=`), plus PRs with no recorded branch |
 | GET | `/api/people` | Configured people with their GitHub login, Azure DevOps identities and matched PR / work item counts, plus unlinked Azure identities |
 | GET | `/api/devops/config` | Azure DevOps connection status (no secrets) and stored counts |
-| POST | `/api/devops/sync` | Start an Azure DevOps sync. Body: `{"lookback_days": 30}`. `400` if not configured, `409` if a sync is running |
+| POST | `/api/devops/sync` | Start an Azure DevOps sync for a range. Body: `{"date_from": "<ISO>", "date_to": "<ISO>"}` (or `{"lookback_days": 30}`). `400` if not configured or the range is invalid, `409` if a sync is running |
 | GET | `/api/devops/sync/status` | `running` / `idle` plus `last_run` statistics |
 | GET | `/api/devops/filters` | Tags (with counts), people (with role/team), work item types, teams |
 | GET | `/api/devops/stories` | Filtered work items + summary + efficiency by person |
-| GET | `/api/devops/dora` | DORA metrics for everyone, `?team=` or `?person=` |
+| GET | `/api/devops/dora` | DORA metrics for everyone, `?team=` or `?person=`, plus the pipeline runs behind them (`runs`, with `attributed_by`) |
 | GET | `/api/devops/report` | Download `?format=csv` or `?format=markdown` for the filtered work items |
 | POST | `/api/snapshots/load` | Load the newest snapshot (or `{"name": ...}`), upserting into the database |
 
 Query parameters:
 
-- `?days=N` (default `30`): the window, i.e. PRs created or merged in the last N days. Applies to `/api/team-performance`, `/api/dora/*`, `/api/developers/{username}/dora` and `/api/chart/*`. The dashboard sends its **Lookback** value.
-- DevOps endpoints take `date_from` / `date_to` (`YYYY-MM-DD`, default the last 30 days), repeatable `tags` and `types`, `tag_mode=any|all`, `person`, `team` and `status=completed|all`.
+- `?date_from=…&date_to=…`: the range, i.e. PRs created or merged in `[date_from, date_to)`. Each takes an ISO date (`2026-10-01`; as `date_to` it covers that whole day) or a date-time (`2026-10-01T09:30:00Z`, `+05:30`; no offset means UTC). `date_to` defaults to now, and without `date_from` the range is the last `?days=N` days (default 30). Applies to `/api/team-performance`, `/api/dora/*`, `/api/developers/{username}/dora`, `/api/chart/*` and `/api/branches`. An invalid range returns `400`.
+- DevOps endpoints take the same `date_from` / `date_to` (default the last 30 days), repeatable `tags` and `types`, `tag_mode=any|all`, `person`, `team` and `status=completed|all`.
 - `?branches=<name>` (repeatable): only PRs targeting these branches. Applies to `/api/team-performance`, `/api/dora/team`, `/api/chart/*`, `/api/developers/{username}/dora`, `/api/developers/{username}/analytics`, `/api/devops/dora` and `/api/devops/report`.
 - `?team=<TeamName>`: scopes the team-level endpoints (`/api/team-performance`, `/api/dora/team`, `/api/developers`, `/api/chart/*`) to one configured team. An unknown team returns `404`. Without it, they cover all configured teams, or everyone when no teams are configured.
 
@@ -720,7 +741,7 @@ This project only sees GitHub data (PRs, reviews, comments, commits), not deploy
 | **Comment themes** | Review comments sorted into style / correctness / testing / maintainability / performance / security by keyword |
 | **Languages** | Taken from the file extensions of commented files |
 
-The dashboard window is the **Lookback** value: metrics include PRs **created or merged** in the last N days. Merge-based figures (merges, lead time, ghost merges, weekly trends, PRs merged per week) count PRs **merged** in the window. The developer review analytics (Summary / AI Metrics / Reviewers tabs) use all stored PRs for that developer.
+The dashboard period is the **date range** in the header: metrics include PRs **created or merged** in that range. Merge-based figures (merges, lead time, ghost merges, weekly trends, PRs merged per week) count PRs **merged** in the window. The developer review analytics (Summary / AI Metrics / Reviewers tabs) use all stored PRs for that developer.
 
 The **Provider** tag on a developer's card names the analyzer that produced the AI metrics: e.g. `Ollama (qwen2.5-coder:14b)`, `OpenAI (gpt-4o)`, `Gemini (gemini-1.5-pro)`, or `Rule-based (heuristic)`. It shows `..., partly heuristic` when the LLM left some fields empty and they were filled by the rule-based analyzer.
 
@@ -744,10 +765,12 @@ app/
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
   ingest.py             Upserts fetched data into PostgreSQL
   queries.py            Team / developer / chart queries
+  time_window.py        Date/time ranges shared by the API filters and both syncs
   dora_metrics.py       DORA-inspired metrics and weekly trends
   developer_analytics.py  Per-developer review analytics + narrative
   ai_analyzers.py       Online LLM → Ollama → rule-based analyzer
-frontend/               React + Vite dashboard (src/components/GitAnalyticsDashboard.tsx)
+frontend/               React + Vite dashboard (src/components: GitAnalyticsDashboard, DevOpsIntegrationPage,
+                        DateTimeRangePicker + dateRange.ts, BranchSelect)
 scripts/                seed_data.sql (demo data), seed_devops.sql (Azure demo data), clear_data.sql (wipe data)
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse
@@ -792,10 +815,12 @@ npm run build
 | DevOps page says "Not configured" | Set `AZURE_DEVOPS_PAT` in `.env` and `azure_devops.organization` / `projects` in `config.yaml`, then restart (section 7.2) |
 | Azure sync fails with "rejected the credentials" | The PAT is expired, belongs to another organization, or lacks the **Work Items: Read** / **Build: Read** scopes |
 | DORA shows "No production deployments" | `deployment_pattern` / `production_pattern` don't match your pipeline names; the page header shows the patterns in use |
+| Filtering DevOps by a person shows few pipeline runs | Runs are attributed by *Requested for*, by the commits/PR refs they built, and by the deployments that shipped the person's PRs (section 7.4). Link the person's Azure identity (`azure_devops:` email or display name) under `teams`, and sync GitHub with **Full refresh on sync** once so PRs have merge commits. The *Why it is included* column shows how each run matched |
+| A custom date range shows other times than expected | The picker uses your browser's time zone; the API and the database use UTC. Ranges include the start and exclude the end |
 | A person's Azure work items appear under their Azure name instead of their configured `name` | Their Azure identity isn't linked: add it to their `azure_devops` list in `teams` (the **People & identities** panel lists unlinked identities) |
 | A developer is missing after a sync | They aren't listed under `teams` in `config.yaml` (check the "not in any team" lines in the log), or their login is misspelled |
 | Dashboard is empty | Click **⟳ Sync from GitHub**, or [load the sample data](#43-load-sample-demo-data). Check `config.yaml` lists the right repositories |
-| Sync finishes but nothing appears | Check `docker compose logs app`. *"GitHub rejected the request (401/403)"* means the token is invalid or lacks access to the repository. Also try a bigger Lookback: only PRs updated in that window are imported |
+| Sync finishes but nothing appears | Check `docker compose logs app`. *"GitHub rejected the request (401/403)"* means the token is invalid or lacks access to the repository. Also try a wider date range: only PRs updated in that range are imported |
 | App container exits with a `github_token` / `database_url` "Field required" error | `GITHUB_TOKEN` is missing from `.env` (or `DATABASE_URL` when running without Docker) |
 | `password authentication failed` after changing `POSTGRES_PASSWORD` | The password is fixed when the volume is first created. Run `docker compose down -v` (deletes data), then start again |
 | `port is already allocated` | Set `APP_PORT` or `POSTGRES_PORT` in `.env` |

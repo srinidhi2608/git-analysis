@@ -14,6 +14,8 @@ def _service(team_config: TeamConfig | None = None) -> GitHubIngestionService:
     """Build a service without an HTTP session or config file."""
     service = GitHubIngestionService.__new__(GitHubIngestionService)
     service.lookback_days = 7
+    service.since = None
+    service.until = None
     service.team_config = team_config or TeamConfig()
     service.skipped = SkippedAuthors()
     service.known_updated_at = {}

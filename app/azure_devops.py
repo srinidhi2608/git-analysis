@@ -70,6 +70,13 @@ def _date(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _wiql_time(value: datetime) -> str:
+    """ISO UTC timestamp for WIQL and the Builds API (naive datetimes are UTC)."""
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def split_tags(value: str | None) -> list[str]:
     if not value:
         return []
@@ -127,17 +134,22 @@ class AzureDevOpsClient:
     # Work items
     # ------------------------------------------------------------------
 
-    def fetch_work_items(self, project: str, since: datetime) -> list[dict[str, Any]]:
-        """Work items of the configured types changed since ``since`` (normalized dicts)."""
+    def fetch_work_items(self, project: str, since: datetime, until: datetime | None = None) -> list[dict[str, Any]]:
+        """Work items of the configured types changed in ``[since, until)`` (normalized dicts)."""
         types = ", ".join("'" + item.replace("'", "''") + "'" for item in self.config.work_item_types)
+        until_clause = f"AND [System.ChangedDate] < '{_wiql_time(until)}' " if until else ""
         wiql = (
             "SELECT [System.Id] FROM WorkItems "
             "WHERE [System.TeamProject] = @project "
             f"AND [System.WorkItemType] IN ({types}) "
-            f"AND [System.ChangedDate] >= '{since.strftime('%Y-%m-%d')}' "
+            f"AND [System.ChangedDate] >= '{_wiql_time(since)}' "
+            f"{until_clause}"
             "ORDER BY [System.ChangedDate] DESC"
         )
-        response = self._request("POST", self._project_url(project, "wit/wiql"), json={"query": wiql})
+        # timePrecision: compare date-times, not just dates.
+        response = self._request(
+            "POST", self._project_url(project, "wit/wiql"), params={"timePrecision": "true"}, json={"query": wiql}
+        )
         ids = [item["id"] for item in response.json().get("workItems", [])]
 
         items: list[dict[str, Any]] = []
@@ -187,17 +199,19 @@ class AzureDevOpsClient:
     # Pipelines
     # ------------------------------------------------------------------
 
-    def fetch_pipeline_runs(self, project: str, since: datetime) -> list[dict[str, Any]]:
-        """Completed pipeline runs that finished since ``since`` (normalized dicts)."""
+    def fetch_pipeline_runs(self, project: str, since: datetime, until: datetime | None = None) -> list[dict[str, Any]]:
+        """Completed pipeline runs that finished in ``[since, until)`` (normalized dicts)."""
         runs: list[dict[str, Any]] = []
         continuation: str | None = None
         while True:
             params: dict[str, Any] = {
-                "minTime": since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "minTime": _wiql_time(since),
                 "queryOrder": "finishTimeDescending",
                 "statusFilter": "completed",
                 "$top": BUILD_PAGE_SIZE,
             }
+            if until:
+                params["maxTime"] = _wiql_time(until)
             if continuation:
                 params["continuationToken"] = continuation
             response = self._request("GET", self._project_url(project, "build/builds"), params=params)
