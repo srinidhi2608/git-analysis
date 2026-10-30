@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import BranchSelect, { type BranchOption } from "./BranchSelect";
+import { type DateRange, defaultRange, rangeLabel, rangeToApi } from "./dateRange";
 import {
   Bar,
   CartesianGrid,
@@ -32,7 +34,7 @@ interface DevOpsConfig {
 }
 
 interface SyncRun {
-  lookback_days?: number;
+  range?: { start: string; end: string; days: number };
   work_items?: number;
   pipeline_runs?: number;
   skipped_work_items?: number;
@@ -158,6 +160,25 @@ interface DoraResponse {
   weekly: { week: string; deployments: number; failed_deployments: number; median_lead_time_hours: number | null }[];
   benchmarks: Record<string, Record<string, string>>;
   pipelines: string[];
+  runs_total: number;
+  runs: PipelineRun[];
+}
+
+interface PipelineRun {
+  id: number;
+  project: string;
+  build_number: string | null;
+  pipeline: string;
+  result: string | null;
+  reason: string | null;
+  is_production_deployment: boolean;
+  repository: string | null;
+  source_branch: string | null;
+  source_version: string | null;
+  requested_for: string | null;
+  finish_time: string | null;
+  attributed_by: string[];
+  url: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,16 +201,6 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
     throw new Error(detail);
   }
   return res.json() as Promise<T>;
-}
-
-function isoDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function daysAgo(days: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() - days);
-  return isoDate(date);
 }
 
 function formatHours(hours: number | null | undefined): string {
@@ -252,14 +263,27 @@ const inputClass =
 // Page
 // ---------------------------------------------------------------------------
 
-export default function DevOpsIntegrationPage() {
+export default function DevOpsIntegrationPage({
+  branchOptions,
+  selectedBranches,
+  onBranchesChange,
+  unknownBranchPrs,
+  dateRange,
+  onDateRangeChange,
+}: {
+  branchOptions: BranchOption[];
+  selectedBranches: string[];
+  onBranchesChange: (branches: string[]) => void;
+  unknownBranchPrs: number;
+  /** Shared with the GitHub pages; also the range fetched by "Sync Azure DevOps". */
+  dateRange: DateRange;
+  onDateRangeChange: (range: DateRange) => void;
+}) {
   const [config, setConfig] = useState<DevOpsConfig | null>(null);
   const [options, setOptions] = useState<FilterOptions | null>(null);
   const [pageError, setPageError] = useState("");
 
   // Filters
-  const [dateFrom, setDateFrom] = useState(daysAgo(29));
-  const [dateTo, setDateTo] = useState(isoDate(new Date()));
   const [team, setTeam] = useState("");
   const [person, setPerson] = useState("");
   const [types, setTypes] = useState<string[]>([]);
@@ -275,7 +299,6 @@ export default function DevOpsIntegrationPage() {
   const [dataError, setDataError] = useState("");
 
   // Sync
-  const [syncDays, setSyncDays] = useState(30);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
 
@@ -301,16 +324,19 @@ export default function DevOpsIntegrationPage() {
     return () => clearTimeout(timer);
   }, [loadMeta]);
 
+  // Filters other than the date range (rolling ranges are resolved at load time).
   const query = useMemo(() => {
-    const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo, tag_mode: tagMode, status });
+    const params = new URLSearchParams({ tag_mode: tagMode, status });
     tags.forEach((tag) => params.append("tags", tag));
     types.forEach((type) => params.append("types", type));
     if (team) params.set("team", team);
     if (person) params.set("person", person);
+    selectedBranches.forEach((branch) => params.append("branches", branch));
     return params.toString();
-  }, [dateFrom, dateTo, tagMode, status, tags, types, team, person]);
+  }, [tagMode, status, tags, types, team, person, selectedBranches]);
 
   const loadData = useCallback(async () => {
+    const fullQuery = `${new URLSearchParams(rangeToApi(dateRange))}&${query}`;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -318,8 +344,8 @@ export default function DevOpsIntegrationPage() {
     setDataError("");
     try {
       const [storyData, doraData] = await Promise.all([
-        getJson<StoriesResponse>(`/api/devops/stories?${query}`, controller.signal),
-        getJson<DoraResponse>(`/api/devops/dora?${query}`, controller.signal),
+        getJson<StoriesResponse>(`/api/devops/stories?${fullQuery}`, controller.signal),
+        getJson<DoraResponse>(`/api/devops/dora?${fullQuery}`, controller.signal),
       ]);
       setStories(storyData);
       setDora(doraData);
@@ -331,7 +357,7 @@ export default function DevOpsIntegrationPage() {
     } finally {
       if (abortRef.current === controller) setLoading(false);
     }
-  }, [query]);
+  }, [query, dateRange]);
 
   // Reload shortly after the filters stop changing.
   useEffect(() => {
@@ -347,7 +373,7 @@ export default function DevOpsIntegrationPage() {
       const res = await fetch("/api/devops/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lookback_days: syncDays }),
+        body: JSON.stringify(rangeToApi(dateRange)),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -387,11 +413,6 @@ export default function DevOpsIntegrationPage() {
     }
   };
 
-  const setRange = (days: number) => {
-    setDateFrom(daysAgo(days - 1));
-    setDateTo(isoDate(new Date()));
-  };
-
   const toggle = (list: string[], value: string) =>
     list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
 
@@ -402,7 +423,7 @@ export default function DevOpsIntegrationPage() {
     setTags([]);
     setTagMode("any");
     setStatus("completed");
-    setRange(30);
+    onDateRangeChange(defaultRange("30d"));
   };
 
   const people = (options?.people ?? []).filter((p) => !team || p.team === team);
@@ -446,19 +467,11 @@ export default function DevOpsIntegrationPage() {
             )}
           </div>
           <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200">
-              <span>Last</span>
-              <input
-                aria-label="Azure sync days"
-                className="w-16 rounded-md border border-slate-600 bg-slate-900 px-2 py-1 text-right focus:outline-none"
-                min={1}
-                max={730}
-                onChange={(e) => setSyncDays(Number(e.target.value) || 30)}
-                type="number"
-                value={syncDays}
-              />
-              <span className="text-xs uppercase tracking-wide text-slate-400">days</span>
-            </label>
+            <span className="max-w-xs text-right text-xs text-slate-400">
+              Fetches items changed in the selected range:
+              <br />
+              <span className="text-slate-200">{rangeLabel(dateRange)}</span>
+            </span>
             <button
               className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-500 disabled:opacity-50"
               disabled={syncing || !config?.configured}
@@ -484,25 +497,9 @@ export default function DevOpsIntegrationPage() {
       {/* Filters */}
       <Card>
         <div className="flex flex-wrap items-end gap-4">
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            From
-            <input className={inputClass} onChange={(e) => setDateFrom(e.target.value)} type="date" value={dateFrom} />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            To
-            <input className={inputClass} onChange={(e) => setDateTo(e.target.value)} type="date" value={dateTo} />
-          </label>
-          <div className="flex gap-1">
-            {[7, 30, 90].map((days) => (
-              <button
-                className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"
-                key={days}
-                onClick={() => setRange(days)}
-                type="button"
-              >
-                {days}d
-              </button>
-            ))}
+          <div className="flex flex-col gap-1 text-xs text-slate-400" title="Change the range with the date picker at the top of the page">
+            Date range
+            <span className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-200">{rangeLabel(dateRange)}</span>
           </div>
           {(options?.teams.length ?? 0) > 0 && (
             <label className="flex flex-col gap-1 text-xs text-slate-400">
@@ -543,6 +540,15 @@ export default function DevOpsIntegrationPage() {
               <option value="all">Finished + open in range</option>
             </select>
           </label>
+          <div className="flex flex-col gap-1 text-xs text-slate-400">
+            PR target branch (DORA lead time)
+            <BranchSelect
+              onChange={onBranchesChange}
+              options={branchOptions}
+              selected={selectedBranches}
+              unknown={unknownBranchPrs}
+            />
+          </div>
           <button className="rounded-lg px-3 py-2 text-xs text-slate-400 hover:text-white" onClick={clearFilters} type="button">
             Clear filters
           </button>
@@ -866,6 +872,7 @@ function DoraSection({ dora, loading, scopeLabel }: { dora: DoraResponse | null;
       {dora.pipelines.length > 0 && (
         <p className="mt-3 text-xs text-slate-500">Deployment pipelines in range: {dora.pipelines.join(", ")}</p>
       )}
+      <PipelineRunsTable dora={dora} />
     </Card>
   );
 }
@@ -1044,5 +1051,90 @@ function StoriesSection({
         )}
       </Card>
     </>
+  );
+}
+
+const RESULT_STYLES: Record<string, string> = {
+  succeeded: "text-emerald-300",
+  partiallysucceeded: "text-amber-300",
+  failed: "text-rose-300",
+  canceled: "text-slate-400",
+};
+
+function PipelineRunsTable({ dora }: { dora: DoraResponse }) {
+  const [onlyDeployments, setOnlyDeployments] = useState(false);
+  const runs = onlyDeployments ? dora.runs.filter((run) => run.is_production_deployment) : dora.runs;
+  const scoped = dora.scope.kind !== "all";
+  return (
+    <div className="mt-6 border-t border-slate-800 pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-semibold text-slate-100">Pipeline runs ({dora.runs_total})</h4>
+          <p className="text-xs text-slate-500">
+            {scoped
+              ? "Runs requested for the selection, runs that built or validated their pull requests, and the deployments that shipped them."
+              : "Every completed run in the range."}
+            {dora.runs_total > dora.runs.length ? ` Showing the latest ${dora.runs.length}.` : ""}
+          </p>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          <input
+            checked={onlyDeployments}
+            className="h-4 w-4 accent-indigo-500"
+            onChange={(e) => setOnlyDeployments(e.target.checked)}
+            type="checkbox"
+          />
+          Production deployments only
+        </label>
+      </div>
+      {runs.length === 0 ? (
+        <p className="mt-3 text-sm text-slate-500">No pipeline runs for this selection in the date range.</p>
+      ) : (
+        <div className="mt-3 max-h-96 overflow-auto rounded-lg border border-slate-800">
+          <table className="w-full min-w-[48rem] text-left text-xs">
+            <thead className="sticky top-0 bg-slate-900 text-slate-400">
+              <tr>
+                <th className="px-3 py-2 font-medium">Finished</th>
+                <th className="px-3 py-2 font-medium">Pipeline</th>
+                <th className="px-3 py-2 font-medium">Build</th>
+                <th className="px-3 py-2 font-medium">Result</th>
+                <th className="px-3 py-2 font-medium">Repository / branch</th>
+                <th className="px-3 py-2 font-medium">Requested for</th>
+                {scoped && <th className="px-3 py-2 font-medium">Why it is included</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800 text-slate-300">
+              {runs.map((run) => (
+                <tr key={run.id}>
+                  <td className="whitespace-nowrap px-3 py-2">{run.finish_time ? new Date(`${run.finish_time}Z`).toLocaleString() : "—"}</td>
+                  <td className="px-3 py-2">
+                    {run.pipeline}
+                    {run.is_production_deployment && (
+                      <span className="ml-2 rounded-full border border-indigo-500/40 px-1.5 py-0.5 text-[10px] text-indigo-300">deploy</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    {run.url ? (
+                      <a className="text-sky-300 hover:underline" href={run.url} rel="noreferrer" target="_blank">
+                        {run.build_number ?? run.id}
+                      </a>
+                    ) : (
+                      run.build_number ?? run.id
+                    )}
+                  </td>
+                  <td className={`px-3 py-2 ${RESULT_STYLES[(run.result ?? "").toLowerCase()] ?? "text-slate-400"}`}>{run.result ?? "—"}</td>
+                  <td className="px-3 py-2">
+                    {run.repository ?? "—"}
+                    {run.source_branch && <span className="block text-slate-500">{run.source_branch.replace(/^refs\/heads\//, "")}</span>}
+                  </td>
+                  <td className="px-3 py-2">{run.requested_for ?? "—"}</td>
+                  {scoped && <td className="px-3 py-2 text-slate-400">{run.attributed_by.join("; ") || "—"}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }

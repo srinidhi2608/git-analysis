@@ -52,6 +52,7 @@ PR_DETAIL_SELECTION = """
 number
 title
 updatedAt
+baseRefName
 mergeCommit { oid }
 createdAt
 mergedAt
@@ -106,6 +107,11 @@ reviewDecision
 DETAIL_BATCH_SIZE = 10
 
 
+def _aware(value: datetime) -> datetime:
+    """Treat naive datetimes as UTC."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 class RateLimitError(Exception):
     """Raised when the GitHub API rate limit is exceeded."""
 
@@ -118,7 +124,10 @@ class GitHubIngestionService:
     config_path:
         Path to the YAML file that lists active repositories.
     lookback_days:
-        How many days back to fetch PRs for (default 7).
+        How many days back to fetch PRs for (default 7), when ``since`` is not given.
+    since, until:
+        Fetch PRs updated in ``[since, until)`` (aware or naive-UTC datetimes).
+        ``until`` defaults to now.
     team_config:
         Team membership. When teams are configured, PRs, reviews, comments and
         commits authored by anyone who is not a listed member are skipped (and
@@ -135,9 +144,13 @@ class GitHubIngestionService:
         lookback_days: int = 7,
         team_config: TeamConfig | None = None,
         known_updated_at: dict[tuple[str, int], datetime] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> None:
         self.config_path = config_path
         self.lookback_days = lookback_days
+        self.since = since
+        self.until = until
         self.team_config = team_config if team_config is not None else load_team_config(config_path)
         self.skipped = SkippedAuthors()
         self.known_updated_at = known_updated_at or {}
@@ -199,7 +212,8 @@ class GitHubIngestionService:
 
     def _fetch_repo_prs(self, owner: str, repo: str) -> list[dict[str, Any]]:
         """Fetch and filter PRs for a single repository."""
-        since = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        since = _aware(self.since) if self.since else datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        until = _aware(self.until) if self.until else None
         prs: list[dict[str, Any]] = []
         cursor: str | None = None
 
@@ -224,6 +238,9 @@ class GitHubIngestionService:
                     # Results are ordered by updatedAt DESC, so every later PR is older too.
                     reached_cutoff = True
                     break
+                if until is not None and updated_at >= until:
+                    # Updated after the end of the requested range.
+                    continue
                 author_login = (node.get("author") or {}).get("login")
                 if not self.team_config.is_member(author_login):
                     # Not a team member: do not download the PR's details at all.
@@ -424,6 +441,7 @@ query({", ".join(variable_definitions)}) {{
             "merged_at": node.get("mergedAt"),
             "updated_at": node.get("updatedAt"),
             "merge_commit_sha": (node.get("mergeCommit") or {}).get("oid"),
+            "base_branch": node.get("baseRefName"),
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
             "changed_files": node.get("changedFiles") or 0,

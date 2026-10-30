@@ -56,6 +56,8 @@ class PullRequest(Base):
     # GitHub's updatedAt when this PR was last ingested; an unchanged value lets a
     # re-sync skip downloading the PR's details again.
     github_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Target (base) branch the PR merges into, e.g. "main" or "release/2026.10".
+    base_branch: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     # Merge commit SHA, used to find the deployment that shipped this PR (DORA lead time).
     merge_commit_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 

@@ -16,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from app.ai_analyzers import HEURISTIC_PROVIDER, get_developer_analyzer
 from app.config import settings
 from app.models import Commit, Developer, PullRequest, PullRequestComment
+from app.queries import in_branches
 
 logger = logging.getLogger(__name__)
 
@@ -398,7 +399,9 @@ AI_COMMENT_SAMPLE_LIMIT = 30
 AI_COMMENT_MAX_CHARS = 600
 
 
-def build_developer_review_analytics(db: Session, github_username: str) -> dict[str, Any] | None:
+def build_developer_review_analytics(
+    db: Session, github_username: str, branches: list[str] | None = None
+) -> dict[str, Any] | None:
     """Compute grounded review analytics for a developer (synchronous, DB-bound).
 
     Returns the response payload without the AI enrichment fields, plus a private
@@ -441,7 +444,7 @@ def build_developer_review_analytics(db: Session, github_username: str) -> dict[
                 Commit.committed_at,
             ),
         )
-        .filter(PullRequest.developer_id == developer.id)
+        .filter(PullRequest.developer_id == developer.id, in_branches(branches))
         .order_by(PullRequest.created_at.desc())
         .all()
     )
@@ -631,13 +634,15 @@ def build_developer_review_analytics(db: Session, github_username: str) -> dict[
     }
 
 
-async def get_developer_review_analytics(db: Session, github_username: str) -> dict[str, Any] | None:
+async def get_developer_review_analytics(
+    db: Session, github_username: str, branches: list[str] | None = None
+) -> dict[str, Any] | None:
     """Build developer analytics and enrich the summary with the 3-tier AI analyzer.
 
     Database queries and the optional blocking HTTP narrator run in a worker
     thread so they do not block the event loop.
     """
-    analytics = await run_in_threadpool(build_developer_review_analytics, db, github_username)
+    analytics = await run_in_threadpool(build_developer_review_analytics, db, github_username, branches)
     if analytics is None:
         return None
 

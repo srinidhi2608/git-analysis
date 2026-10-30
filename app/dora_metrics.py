@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from statistics import median
 from typing import Any
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import Developer, PullRequest
-
-
-def _utc_now_naive() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+from app.queries import active_in_window, in_branches
+from app.time_window import TimeWindow
 
 
 def _round(value: float | None, digits: int = 2) -> float | None:
@@ -32,9 +29,11 @@ def _week_label(value: datetime) -> str:
     return f"{iso[0]}-W{iso[1]:02d}"
 
 
-def _summary_template(window_days: int) -> dict[str, Any]:
+def _summary_template(window: TimeWindow) -> dict[str, Any]:
     return {
-        "window_days": window_days,
+        "window_days": round(window.days, 2),
+        "window_start": window.start.isoformat() + "Z",
+        "window_end": window.end.isoformat() + "Z",
         "pull_request_count": 0,
         "merged_pull_request_count": 0,
         "reviewed_pull_request_count": 0,
@@ -57,22 +56,13 @@ def _is_ghost_merge(pull_request: PullRequest) -> bool:
     return pull_request.merged_at is not None and (pull_request.reviewers_count or 0) == 0
 
 
-def _window_start(window_days: int) -> datetime:
-    return _utc_now_naive() - timedelta(days=window_days)
-
-
-def _active_in_window(since: datetime):
-    """PRs created or merged within the window."""
-    return or_(PullRequest.created_at >= since, PullRequest.merged_at >= since)
-
-
-def _build_metrics(prs: list[PullRequest], window_days: int, since: datetime) -> dict[str, Any]:
-    """Summary and weekly trends for PRs active in the window starting at ``since``.
+def _build_metrics(prs: list[PullRequest], window: TimeWindow) -> dict[str, Any]:
+    """Summary and weekly trends for PRs active in ``window``.
 
     Merge-based figures (merges, lead time, ghost merges, weekly trends) only count
     PRs merged inside the window.
     """
-    summary = _summary_template(window_days)
+    summary = _summary_template(window)
     if not prs:
         return {"summary": summary, "weekly_trends": []}
 
@@ -117,7 +107,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, since: datetime) ->
         if (pull_request.approvals_count or 0) > 0:
             approved_pr_count += 1
 
-        merged_in_window = pull_request.merged_at is not None and pull_request.merged_at >= since
+        merged_in_window = window.contains(pull_request.merged_at)
         if lead_time is not None and merged_in_window:
             lead_times.append(lead_time)
         if first_review_time is not None:
@@ -131,7 +121,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, since: datetime) ->
             if recovery_time is not None:
                 recovery_times.append(recovery_time)
 
-        if pull_request.merged_at is None or pull_request.merged_at < since:
+        if not merged_in_window:
             continue
 
         merged_pr_count += 1
@@ -158,7 +148,7 @@ def _build_metrics(prs: list[PullRequest], window_days: int, since: datetime) ->
 
     summary["merged_pull_request_count"] = merged_pr_count
     summary["reviewed_pull_request_count"] = reviewed_pr_count
-    summary["merge_frequency_per_week"] = _round(merged_pr_count / max(window_days / 7, 1), 2)
+    summary["merge_frequency_per_week"] = _round(merged_pr_count / window.weeks, 2)
     summary["average_lead_time_hours"] = _round(sum(lead_times) / len(lead_times) if lead_times else None)
     summary["median_lead_time_hours"] = _round(median(lead_times) if lead_times else None)
     summary["average_time_to_first_review_hours"] = _round(
@@ -208,36 +198,40 @@ def get_team_dora_metrics(
     db: Session,
     window_days: int = 30,
     teams: list[str] | None = None,
+    branches: list[str] | None = None,
+    window: TimeWindow | None = None,
 ) -> dict[str, Any]:
-    since = _window_start(window_days)
+    window = window or TimeWindow.last_days(window_days)
     query = (
         db.query(PullRequest)
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .filter(_active_in_window(since))
+        .filter(active_in_window(window), in_branches(branches))
     )
     if teams is not None:
         query = query.filter(Developer.team_name.in_(teams))
     prs = query.order_by(PullRequest.created_at.desc()).all()
-    return _build_metrics(prs, window_days=window_days, since=since)
+    return _build_metrics(prs, window)
 
 
 def get_developer_dora_metrics(
     db: Session,
     github_username: str,
     window_days: int = 30,
+    branches: list[str] | None = None,
+    window: TimeWindow | None = None,
 ) -> dict[str, Any] | None:
     developer = db.query(Developer).filter(Developer.github_username == github_username).one_or_none()
     if developer is None:
         return None
 
-    since = _window_start(window_days)
+    window = window or TimeWindow.last_days(window_days)
     prs = (
         db.query(PullRequest)
-        .filter(PullRequest.developer_id == developer.id, _active_in_window(since))
+        .filter(PullRequest.developer_id == developer.id, active_in_window(window), in_branches(branches))
         .order_by(PullRequest.created_at.desc())
         .all()
     )
-    metrics = _build_metrics(prs, window_days=window_days, since=since)
+    metrics = _build_metrics(prs, window)
     return {
         "github_username": developer.github_username,
         "team_name": developer.team_name,

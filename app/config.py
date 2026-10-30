@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     azure_devops_pat: str | None = None
     azure_devops_org: str | None = None
 
+    # Production settings.
+    # Comma-separated origins allowed to call the API from a browser on another
+    # origin ("*" = any). The bundled UI is same-origin and needs none.
+    cors_allow_origins: str = "*"
+    # Serve the interactive API docs (/docs, /redoc, /openapi.json).
+    enable_api_docs: bool = True
+    log_level: str = "INFO"
+
     # Snapshots of the ingested data (see app/snapshot.py).
     snapshot_dir: str = "snapshots"
     # Load the newest snapshot at startup when the database has no pull requests.

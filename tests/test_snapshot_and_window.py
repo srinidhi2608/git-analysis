@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from app.dora_metrics import get_team_dora_metrics
 from app.models import Base, Commit, Developer, PullRequest, PullRequestComment, Repository
 from app.queries import get_prs_per_week
+from app.time_window import TimeWindow
 from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_snapshot
 
 NOW = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
@@ -99,9 +100,10 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(restored.merged_at, original.merged_at)
         self.assertEqual(restored.github_updated_at, original.github_updated_at)
         self.assertEqual(restored.developer.github_username, "alice")
+        window = TimeWindow.last_days(30)
         self.assertEqual(
-            get_team_dora_metrics(target, window_days=30)["summary"],
-            get_team_dora_metrics(source, window_days=30)["summary"],
+            get_team_dora_metrics(target, window=window)["summary"],
+            get_team_dora_metrics(source, window=window)["summary"],
         )
 
     def test_loading_twice_upserts_without_duplicates(self):

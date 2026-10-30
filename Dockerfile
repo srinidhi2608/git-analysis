@@ -44,23 +44,49 @@ COPY config.yaml ./
 # Copy the built React app so FastAPI can serve it
 COPY --from=node-builder /build/frontend/dist ./frontend/dist/
 
-# Non-root user for security. The entrypoint starts as root only to make the
-# bind-mounted ./snapshots directory writable, then runs the app as appuser.
+# Certificates (see certs/README.md). Everything placed under ./certs is copied
+# into the image; at runtime docker-compose mounts ./certs over it read-only, so
+# certificates can also be rotated without rebuilding. Private keys are kept
+# root-only; the entrypoint hands the app user its own copy.
+COPY certs/ /app/certs/
+
+# Entrypoint + healthcheck. Strip Windows line endings (a CRLF checkout breaks
+# the "#!/bin/sh" line with "exec ... no such file or directory").
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-# Strip Windows line endings (a CRLF checkout breaks the "#!/bin/sh" line with
-# "exec ... no such file or directory").
+COPY docker/healthcheck.py /usr/local/bin/healthcheck.py
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && \
-    chmod +x /usr/local/bin/entrypoint.sh && \
+    chmod 0755 /usr/local/bin/entrypoint.sh && \
+    chmod 0644 /usr/local/bin/healthcheck.py && \
     adduser --disabled-password --gecos "" --uid 1000 appuser && \
-    mkdir -p /app/snapshots && \
-    chown -R appuser:appuser /app
+    # Application code stays root-owned (read-only for the app user); only
+    # snapshots and the runtime directory are writable.
+    mkdir -p /app/snapshots /app/run && \
+    chown appuser:appuser /app/snapshots /app/run && \
+    chown -R root:root /app/certs && \
+    find /app/certs -type d -exec chmod 0755 {} + && \
+    find /app/certs -type f -exec chmod 0600 {} +
+
+ENV HOST=0.0.0.0 \
+    PORT=8000 \
+    WEB_CONCURRENCY=1 \
+    LOG_LEVEL=info \
+    TLS_ENABLED=auto \
+    TLS_CERT_FILE=/app/certs/tls/server.crt \
+    TLS_KEY_FILE=/app/certs/tls/server.key \
+    TLS_CLIENT_CA_FILE=/app/certs/tls/client-ca.crt \
+    CA_CERTS_DIR=/app/certs/ca
+
+# The entrypoint starts as root only to prepare certificates and permissions,
+# then runs the app as `appuser` (see docker/entrypoint.sh).
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)" || exit 1
+    CMD ["python", "/usr/local/bin/healthcheck.py"]
 
-# DATABASE_URL and GITHUB_TOKEN must be supplied at runtime as environment
-# variables (docker compose wires these up from .env).
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# "serve" starts uvicorn with production settings (HTTPS when certificates are
+# present). Any other command runs as-is, e.g. `docker compose run app python -m ...`.
+# DATABASE_URL and GITHUB_TOKEN must be supplied at runtime (docker compose wires
+# these up from .env).
+CMD ["serve"]

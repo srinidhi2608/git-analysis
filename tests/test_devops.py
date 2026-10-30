@@ -92,7 +92,8 @@ def _work_item(db, item_id, *, assigned, created_by=None, closed=None, activated
     )
 
 
-def _run(db, build_id, name, result, finish, *, repo="org/shop", sha=None, definition_id=1):
+def _run(db, build_id, name, result, finish, *, repo="org/shop", sha=None, definition_id=1,
+         requested_for=None, requested_email=None, branch="refs/heads/main"):
     upsert_pipeline_run(
         db,
         {
@@ -102,10 +103,12 @@ def _run(db, build_id, name, result, finish, *, repo="org/shop", sha=None, defin
             "definition_name": name,
             "status": "completed",
             "result": result,
-            "source_branch": "refs/heads/main",
+            "source_branch": branch,
             "source_version": sha,
             "repository_name": repo,
             "repository_type": "GitHub",
+            "requested_for": requested_for,
+            "requested_for_email": requested_email,
             "finish_time": finish,
         },
     )
@@ -153,7 +156,7 @@ class ClientTests(unittest.TestCase):
 
         wiql_call, first_batch, second_batch = session.request.call_args_list
         self.assertIn("/Shop/_apis/wit/wiql", wiql_call.args[1])
-        self.assertIn("[System.ChangedDate] >= '2026-09-01'", wiql_call.kwargs["json"]["query"])
+        self.assertIn("[System.ChangedDate] >= '2026-09-01T00:00:00Z'", wiql_call.kwargs["json"]["query"])
         self.assertEqual(len(first_batch.kwargs["json"]["ids"]), 200)
         self.assertEqual(len(second_batch.kwargs["json"]["ids"]), 50)
         item = items[0]
@@ -347,8 +350,8 @@ class DoraTests(unittest.TestCase):
         self.assertEqual(dora["scope"]["kind"], "person")
         self.assertEqual(dora["deployment_frequency"]["deployments"], 1)
         self.assertEqual(dora["lead_time"]["median_hours"], 8.0)
-        # bob's first deployment attempt after merge was the failed run at day 1 +6h
-        self.assertEqual((dora["change_failure_rate"]["failed"], dora["change_failure_rate"]["total"]), (1, 1))
+        # bob's first deployment attempt after merge failed (day 1 +6h); the next one shipped his PR.
+        self.assertEqual((dora["change_failure_rate"]["failed"], dora["change_failure_rate"]["total"]), (1, 2))
         team = compute_dora(self.db, CONFIG, TEAMS, *self.range, team="Growth")
         self.assertEqual(team["lead_time"]["pull_requests"], 1)
 
@@ -363,6 +366,54 @@ class DoraTests(unittest.TestCase):
         self.assertEqual(dora["change_failure_rate"]["rate"], 20.0)
         # deploy day 2 at +8h -> incident closed day 2 at +12h
         self.assertEqual(dora["recovery_time"]["median_hours"], 4.0)
+
+
+class PersonRunAttributionTests(unittest.TestCase):
+    """Filtering DORA by person/team must keep every pipeline run that belongs to them."""
+
+    def setUp(self):
+        self.db = db = _session()
+        # Azure Repos name the repository "shop"; GitHub calls it "org/shop".
+        _pr(db, 1, "alice", T0, sha="m1", first_commit=T0 - timedelta(hours=4))
+        _pr(db, 2, "bob", T0 + timedelta(days=1), sha="m2")
+        db.add(Commit(pr_id=2, developer_id=2, commit_hash="b-head", message="m", committed_at=T0))
+        # Deployment of a later commit of the repo -> ships alice's PR (repo name differs).
+        _run(db, 1, "Deploy Prod", "succeeded", T0 + timedelta(hours=3), repo="shop", sha="later")
+        # Manual production deploy requested by alice (no PR link at all).
+        _run(db, 2, "Deploy Prod", "failed", T0 + timedelta(days=2), repo="infra", sha="x",
+             requested_for="Alice", requested_email="alice@corp.com")
+        # CI build of bob's PR head commit, and his PR validation build.
+        _run(db, 3, "Build CI", "succeeded", T0 + timedelta(hours=1), sha="b-head")
+        _run(db, 4, "PR validation", "failed", T0 + timedelta(hours=2), sha="preview", branch="refs/pull/2/merge")
+        # Someone else's run.
+        _run(db, 5, "Build CI", "succeeded", T0 + timedelta(hours=5), sha="zzz", requested_for="Stranger")
+        db.commit()
+        self.range = (DAY, DAY + timedelta(days=6))
+
+    def test_person_gets_requested_runs_and_deployments_across_repo_names(self):
+        dora = compute_dora(self.db, CONFIG, TEAMS, *self.range, person="alice")
+        runs = {run["id"]: run for run in dora["runs"]}
+        self.assertEqual(sorted(runs), [1, 2])
+        self.assertIn("shipped org/shop#1", runs[1]["attributed_by"])
+        self.assertEqual(runs[2]["requested_for"], "alice")
+        self.assertTrue(runs[2]["is_production_deployment"])
+        self.assertEqual(dora["deployment_frequency"]["deployments"], 1)
+        self.assertEqual(dora["lead_time"]["median_hours"], 7.0)
+        # The failed manual deployment counts against alice.
+        self.assertEqual((dora["change_failure_rate"]["failed"], dora["change_failure_rate"]["total"]), (1, 2))
+
+    def test_person_gets_ci_and_pr_validation_builds_of_their_prs(self):
+        dora = compute_dora(self.db, CONFIG, TEAMS, *self.range, person="bob")
+        runs = {run["id"]: run["attributed_by"] for run in dora["runs"]}
+        self.assertEqual(sorted(runs), [3, 4])
+        self.assertEqual(runs[3], ["built org/shop#2"])
+        self.assertEqual(runs[4], ["validated org/shop#2"])
+
+    def test_team_and_everyone_scopes(self):
+        growth = compute_dora(self.db, CONFIG, TEAMS, *self.range, team="Growth")
+        self.assertEqual(sorted(run["id"] for run in growth["runs"]), [1, 2])
+        everyone = compute_dora(self.db, CONFIG, TEAMS, *self.range)
+        self.assertEqual(everyone["runs_total"], 5)
 
 
 class SnapshotTests(unittest.TestCase):

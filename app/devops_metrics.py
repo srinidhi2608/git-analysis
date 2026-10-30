@@ -45,7 +45,9 @@ from app.models import (
     PullRequest,
     Repository,
 )
+from app.queries import in_branches
 from app.teams import TeamConfig
+from app.time_window import TimeWindow
 
 SUCCESS_RESULTS = {"succeeded", "partiallysucceeded"}
 FAILURE_RESULTS = {"failed", "canceled", "none"}
@@ -231,11 +233,22 @@ class StoryFilters:
     team: str | None = None
     types: list[str] = field(default_factory=list)
     status: str = "completed"  # completed (closed in range) | all (also open items active in range)
+    # Exact date-time range; defaults to whole days date_from .. date_to.
+    window: TimeWindow | None = None
+
+    @property
+    def bounds(self) -> TimeWindow:
+        return self.window or TimeWindow(*_range_bounds(self.date_from, self.date_to))
+
+    @property
+    def weeks(self) -> float:
+        return self.bounds.weeks
 
     def describe(self) -> dict[str, Any]:
         return {
             "date_from": self.date_from.isoformat(),
             "date_to": self.date_to.isoformat(),
+            "window": self.bounds.describe(),
             "tags": self.tags,
             "tag_mode": self.tag_mode,
             "person": self.person,
@@ -303,7 +316,7 @@ def _matches_tags(item_tags: Iterable[str], wanted: list[str], mode: str) -> boo
 
 
 def query_stories(db: Session, filters: StoryFilters, team_config: TeamConfig) -> list[dict[str, Any]]:
-    start, end = _range_bounds(filters.date_from, filters.date_to)
+    start, end = filters.bounds.start, filters.bounds.end
     query = db.query(AzureWorkItem).options(selectinload(AzureWorkItem.tags))
     if filters.status == "all":
         query = query.filter(
@@ -339,7 +352,7 @@ def summarize_stories(stories: list[dict[str, Any]], filters: StoryFilters) -> d
     completed = [story for story in stories if story["closed_date"]]
     cycle = [story["cycle_time_days"] for story in completed if story["cycle_time_days"] is not None]
     lead = [story["lead_time_days"] for story in completed if story["lead_time_days"] is not None]
-    weeks = max(((filters.date_to - filters.date_from).days + 1) / 7, 1)
+    weeks = filters.weeks
     tag_counts = Counter(tag for story in stories for tag in story["tags"])
     return {
         "total": len(stories),
@@ -360,8 +373,8 @@ def people_efficiency(
     db: Session, stories: list[dict[str, Any]], filters: StoryFilters, team_config: TeamConfig
 ) -> list[dict[str, Any]]:
     """Per-person delivery in the date range: stories finished, points, cycle time, bugs reported, PRs merged."""
-    start, end = _range_bounds(filters.date_from, filters.date_to)
-    weeks = max(((filters.date_to - filters.date_from).days + 1) / 7, 1)
+    start, end = filters.bounds.start, filters.bounds.end
+    weeks = filters.weeks
     rows: dict[str, dict[str, Any]] = {}
 
     def row_for(person: Person) -> dict[str, Any]:
@@ -449,22 +462,6 @@ def _is_failure(run: AzurePipelineRun) -> bool:
     return (run.result or "").lower() in FAILURE_RESULTS
 
 
-def _production_deployments(db: Session, config: DevOpsConfig, since: datetime) -> list[AzurePipelineRun]:
-    runs = (
-        db.query(AzurePipelineRun)
-        .filter(AzurePipelineRun.finish_time >= since)
-        .order_by(AzurePipelineRun.finish_time)
-        .all()
-    )
-    return [
-        run
-        for run in runs
-        if config.is_deployment(run.definition_name)
-        and config.is_production(run.definition_name)
-        and (_is_success(run) or _is_failure(run))
-    ]
-
-
 def _first_commit_times(db: Session, pr_ids: list[int]) -> dict[int, datetime]:
     if not pr_ids:
         return {}
@@ -514,6 +511,37 @@ def _incidents(db: Session, config: DevOpsConfig, since: datetime) -> list[Azure
     return [item for item in items if config.is_incident(item.work_item_type, [tag.tag for tag in item.tags])]
 
 
+def _repo_keys(name: str | None) -> set[str]:
+    """Names a repository can appear under: ``owner/repo`` on GitHub, bare ``repo`` in Azure Repos."""
+    if not name:
+        return set()
+    full = name.strip().lower()
+    return {full, full.rsplit("/", 1)[-1]}
+
+
+def _run_dict(run: AzurePipelineRun, config: DevOpsConfig, team_config: TeamConfig, reasons: list[str]) -> dict[str, Any]:
+    requester = resolve_person(team_config, run.requested_for_email, run.requested_for)
+    return {
+        "id": run.id,
+        "project": run.project,
+        "build_number": run.build_number,
+        "pipeline": run.definition_name,
+        "result": run.result,
+        "reason": run.reason,
+        "is_production_deployment": config.is_deployment(run.definition_name) and config.is_production(run.definition_name),
+        "repository": run.repository_name,
+        "source_branch": run.source_branch,
+        "source_version": run.source_version,
+        "requested_for": requester.label if requester else None,
+        "finish_time": run.finish_time.isoformat() if run.finish_time else None,
+        "attributed_by": reasons,
+        "url": run.url,
+    }
+
+
+MAX_RUNS_LISTED = 500
+
+
 def compute_dora(
     db: Session,
     config: DevOpsConfig,
@@ -522,65 +550,143 @@ def compute_dora(
     date_to: date,
     person: str | None = None,
     team: str | None = None,
+    branches: list[str] | None = None,
+    window: TimeWindow | None = None,
 ) -> dict[str, Any]:
-    start, end = _range_bounds(date_from, date_to)
-    deployments = _production_deployments(db, config, start - LOOKBACK_FOR_LINKING)
+    """DORA metrics plus the pipeline runs of the scope (everyone, a team or a person).
+
+    A run belongs to a person (or a team's members) when any of these hold:
+
+    * it was requested for them in Azure Pipelines (manual runs, their pushes);
+    * it built the merge commit, a commit, or the ``refs/pull/<n>/merge`` ref of
+      one of their pull requests;
+    * it is the deployment that shipped one of their PRs (the first successful
+      production deployment of the repository after the merge).
+    """
+    window = window or TimeWindow(*_range_bounds(date_from, date_to))
+    start, end = window.start, window.end
+    scoped = bool(person or team)
+
+    all_runs = (
+        db.query(AzurePipelineRun)
+        .filter(AzurePipelineRun.finish_time >= start - LOOKBACK_FOR_LINKING, AzurePipelineRun.finish_time < end)
+        .order_by(AzurePipelineRun.finish_time)
+        .all()
+    )
+    deployments = [
+        run
+        for run in all_runs
+        if config.is_deployment(run.definition_name)
+        and config.is_production(run.definition_name)
+        and (_is_success(run) or _is_failure(run))
+    ]
     successful_all = [run for run in deployments if _is_success(run)]
 
+    # Whose runs/PRs are in scope.
+    def in_scope_member(member_key: str | None, member_team: str | None) -> bool:
+        if person:
+            return member_key is not None and member_key.lower() == person.lower()
+        if team:
+            return member_team == team
+        return True
+
+    def requested_in_scope(run: AzurePipelineRun) -> bool:
+        if not scoped or not (run.requested_for or run.requested_for_email):
+            return False
+        member = team_config.member_for_azure(run.requested_for_email, run.requested_for)
+        if member is not None:
+            return in_scope_member(member.key, member.team)
+        # Not a configured member: a raw identity can still be filtered on directly.
+        identity = {value.lower() for value in (run.requested_for, run.requested_for_email) if value}
+        return bool(person) and person.lower() in identity
+
     # PRs (optionally scoped to a person / team) and the deployment that shipped each.
-    pr_query = (
+    prs = (
         db.query(PullRequest, Repository.name, Developer.github_username)
         .join(Repository, PullRequest.repo_id == Repository.id)
         .join(Developer, PullRequest.developer_id == Developer.id)
         .filter(PullRequest.merged_at >= start - LOOKBACK_FOR_LINKING, PullRequest.merged_at < end)
+        .filter(in_branches(branches))
+        .all()
     )
-    prs = pr_query.all()
     if person:
         login = (github_login_for(team_config, person) or "").lower()
-        prs = [row for row in prs if row[2].lower() == login]
+        prs = [row for row in prs if login and row[2].lower() == login]
     elif team:
         prs = [row for row in prs if team_config.team_for(row[2]) == team]
     first_commits = _first_commit_times(db, [pr.id for pr, _, _ in prs])
 
-    by_sha = {run.source_version.lower(): run for run in successful_all if run.source_version}
+    by_sha: dict[str, AzurePipelineRun] = {}
     by_repo: dict[str, list[AzurePipelineRun]] = defaultdict(list)
     attempts_by_repo: dict[str, list[AzurePipelineRun]] = defaultdict(list)
     for run in deployments:
-        if run.repository_name:
-            attempts_by_repo[run.repository_name.lower()].append(run)
+        if _is_success(run) and run.source_version:
+            by_sha.setdefault(run.source_version.lower(), run)  # earliest deployment of the commit
+        for key in _repo_keys(run.repository_name):
+            attempts_by_repo[key].append(run)
             if _is_success(run):
-                by_repo[run.repository_name.lower()].append(run)
+                by_repo[key].append(run)
 
+    def first_after(runs_by_repo: dict[str, list[AzurePipelineRun]], repo_name: str, moment: datetime):
+        for key in sorted(_repo_keys(repo_name), key=len, reverse=True):  # full name first
+            run = next((run for run in runs_by_repo.get(key, []) if run.finish_time >= moment), None)
+            if run is not None:
+                return run
+        return None
+
+    reasons: dict[int, list[str]] = defaultdict(list)
     shipped: list[tuple[PullRequest, AzurePipelineRun, float]] = []
     first_attempts: list[AzurePipelineRun] = []
     for pr, repo_name, _ in prs:
-        deployment = by_sha.get((pr.merge_commit_sha or "").lower())
-        if deployment is None:
-            deployment = next(
-                (run for run in by_repo.get(repo_name.lower(), []) if run.finish_time >= pr.merged_at), None
-            )
-        attempt = next(
-            (run for run in attempts_by_repo.get(repo_name.lower(), []) if run.finish_time >= pr.merged_at), None
-        )
+        deployment = by_sha.get((pr.merge_commit_sha or "").lower()) or first_after(by_repo, repo_name, pr.merged_at)
+        attempt = first_after(attempts_by_repo, repo_name, pr.merged_at)
         if attempt is not None and start <= attempt.finish_time < end:
             first_attempts.append(attempt)
         if deployment is None or not (start <= deployment.finish_time < end):
             continue
+        reasons[deployment.id].append(f"shipped {repo_name}#{pr.pr_number}")
         lead = _hours(deployment.finish_time, first_commits.get(pr.id) or pr.created_at)
         if lead is not None:
             shipped.append((pr, deployment, lead))
 
-    scoped = bool(person or team)
+    in_range_runs = [run for run in all_runs if start <= run.finish_time < end]
     in_range = [run for run in deployments if start <= run.finish_time < end]
     if scoped:
-        shipped_ids = {deployment.id for _, deployment, _ in shipped}
-        successful = [run for run in successful_all if run.id in shipped_ids]
-        attempts = list({run.id: run for run in first_attempts}.values())
+        # Runs that built the scope's commits or PR refs, or were requested for them.
+        shas: dict[str, str] = {}
+        pr_refs: dict[tuple[str, str], str] = {}
+        for pr, repo_name, _ in prs:
+            label = f"{repo_name}#{pr.pr_number}"
+            if pr.merge_commit_sha:
+                shas[pr.merge_commit_sha.lower()] = label
+            for key in _repo_keys(repo_name):
+                pr_refs[(key, f"refs/pull/{pr.pr_number}/merge")] = label
+        pr_ids = {pr.id: f"{repo_name}#{pr.pr_number}" for pr, repo_name, _ in prs}
+        if pr_ids:
+            for pr_id, commit_hash in db.query(Commit.pr_id, Commit.commit_hash).filter(Commit.pr_id.in_(list(pr_ids))):
+                if commit_hash:
+                    shas.setdefault(commit_hash.lower(), pr_ids[pr_id])
+        for run in in_range_runs:
+            if requested_in_scope(run):
+                reasons[run.id].append("requested for " + (run.requested_for or run.requested_for_email or ""))
+            if run.source_version and run.source_version.lower() in shas:
+                reasons[run.id].append(f"built {shas[run.source_version.lower()]}")
+            for key in _repo_keys(run.repository_name):
+                label = pr_refs.get((key, (run.source_branch or "").lower()))
+                if label:
+                    reasons[run.id].append(f"validated {label}")
+                    break
+        scope_ids = {run_id for run_id, why in reasons.items() if why}
+        successful = [run for run in in_range if _is_success(run) and run.id in scope_ids]
+        attempts = list({run.id: run for run in [*first_attempts, *(run for run in in_range if run.id in scope_ids)]}.values())
+        attempts.sort(key=lambda run: run.finish_time)
+        listed_runs = [run for run in in_range_runs if run.id in scope_ids]
     else:
         successful = [run for run in successful_all if start <= run.finish_time < end]
         attempts = in_range
+        listed_runs = in_range_runs
 
-    frequency = _deployment_frequency(successful, date_from, date_to)
+    frequency = _deployment_frequency(successful, window.start.date(), (window.end - timedelta(microseconds=1)).date())
     lead_times = [lead for _, _, lead in shipped]
     median_lead = _median(lead_times)
 
@@ -628,7 +734,7 @@ def compute_dora(
     median_recovery = _median(recovery)
 
     weekly = []
-    for week in _weeks_in_range(date_from, date_to):
+    for week in _weeks_in_range(window.start.date(), (window.end - timedelta(microseconds=1)).date()):
         week_end = week + timedelta(days=7)
         week_success = [run for run in successful if week <= run.finish_time.date() < week_end]
         week_failed = [run for run in attempts if _is_failure(run) and week <= run.finish_time.date() < week_end]
@@ -642,6 +748,7 @@ def compute_dora(
             }
         )
 
+    listed_runs.sort(key=lambda run: run.finish_time, reverse=True)
     return {
         "scope": {
             "person": person,
@@ -651,6 +758,7 @@ def compute_dora(
         },
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
+        "window": window.describe(),
         "method": method,
         "deployment_frequency": frequency,
         "lead_time": {
@@ -673,7 +781,12 @@ def compute_dora(
         },
         "weekly": weekly,
         "benchmarks": BENCHMARKS,
-        "pipelines": sorted({run.definition_name for run in in_range}),
+        "pipelines": sorted({run.definition_name for run in (in_range if not scoped else successful + attempts)}),
+        "runs_total": len(listed_runs),
+        "runs": [
+            _run_dict(run, config, team_config, reasons.get(run.id, []))
+            for run in listed_runs[:MAX_RUNS_LISTED]
+        ],
     }
 
 
@@ -739,7 +852,10 @@ def markdown_report(
     dora: dict[str, Any] | None,
     person_label: str | None = None,
 ) -> str:
-    applied = [f"**Date range:** {filters.date_from} to {filters.date_to} ({filters.status} items)"]
+    bounds = filters.bounds
+    applied = [
+        f"**Date range:** {bounds.start:%Y-%m-%d %H:%M} to {bounds.end:%Y-%m-%d %H:%M} UTC ({filters.status} items)"
+    ]
     if filters.tags:
         applied.append(f"**Tags ({filters.tag_mode}):** {', '.join(filters.tags)}")
     if filters.types:
@@ -789,6 +905,21 @@ def markdown_report(
             f"| Failed deployment recovery time (median) | {_format_hours(recovery['median_hours'])} | {_md(recovery['level'])} |",
             "",
         ]
+        runs = dora.get("runs") or []
+        if runs:
+            lines += [
+                f"### Pipeline runs ({dora.get('runs_total', len(runs))})",
+                "",
+                "| Finished (UTC) | Pipeline | Build | Result | Requested for | Why it is included |",
+                "|---|---|---|---|---|---|",
+            ]
+            for run in runs[:100]:
+                build = f"[{_md(run['build_number'])}]({run['url']})" if run["url"] else _md(run["build_number"])
+                lines.append(
+                    f"| {_md((run['finish_time'] or '')[:16].replace('T', ' '))} | {_md(run['pipeline'])} | {build} | "
+                    f"{_md(run['result'])} | {_md(run['requested_for'])} | {_md('; '.join(run['attributed_by']))} |"
+                )
+            lines.append("")
     lines += [
         "## Efficiency by person",
         "",

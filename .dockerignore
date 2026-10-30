@@ -35,3 +35,6 @@ scripts/
 
 # Data snapshots are mounted at runtime, not baked into the image
 snapshots/
+
+# Documentation inside certs/ is not needed in the image
+certs/README.md

@@ -129,8 +129,12 @@ def run_devops_ingestion(
     config_path: str = "config.yaml",
     devops_config: DevOpsConfig | None = None,
     client: AzureDevOpsClient | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> DevOpsSyncStats:
-    """Fetch work items and pipeline runs changed in the last ``lookback_days`` and upsert them.
+    """Fetch work items and pipeline runs changed in ``[since, until)`` and upsert them.
+
+    ``since`` defaults to ``lookback_days`` ago and ``until`` to now.
 
     With teams configured, work items neither assigned to nor created by a team
     member are skipped (and logged), like GitHub data from non-members.
@@ -141,13 +145,13 @@ def run_devops_ingestion(
         raise RuntimeError("Azure DevOps is not configured: missing " + ", ".join(config.missing()))
     team_config = load_team_config(config_path)
     client = client or AzureDevOpsClient(config)
-    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    since = since or datetime.now(timezone.utc) - timedelta(days=lookback_days)
     stats = DevOpsSyncStats(projects=list(config.projects))
     skipped = SkippedAuthors()
 
     for project in config.projects:
         logger.info("Fetching Azure DevOps work items and pipeline runs for %s.", project)
-        for data in client.fetch_work_items(project, since):
+        for data in client.fetch_work_items(project, since, until):
             if not _belongs_to_team(data, team_config):
                 identity = data.get("assigned_to_email") or data.get("assigned_to")
                 if identity and data.get("assigned_to") and data.get("assigned_to_email"):
@@ -158,7 +162,7 @@ def run_devops_ingestion(
             upsert_work_item(db, data)
             stats.work_items += 1
         db.flush()
-        for data in client.fetch_pipeline_runs(project, since):
+        for data in client.fetch_pipeline_runs(project, since, until):
             upsert_pipeline_run(db, data)
             stats.pipeline_runs += 1
         db.commit()
