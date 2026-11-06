@@ -346,8 +346,31 @@ FROM repositories r,
 (VALUES
   ('bob_dev',   11, 'Saved payment methods UI',            'feature/1011-saved-cards',  150, 110, 3, 260, 40, 'MERGED'),
   ('bob_dev',   12, 'AB#1011 Saved cards: retry on decline', 'feature/1011-card-retry',  90, NULL, 1,  60, 10, 'OPEN'),
-  ('carol_dev', 13, 'Dark mode tokens',                    'feature/1012-dark-mode',    130,  80, 2, 180, 90, 'MERGED')
+  ('carol_dev', 13, 'Dark mode tokens',                    'feature/1012-dark-mode',    130,  80, 2, 180, 90, 'MERGED'),
+  ('alice_dev', 14, 'Bump dependency versions',            'chore/deps-bump',            60,  58, 0,  40, 40, 'MERGED')
 ) AS s (developer, num, title, branch, created_ago, merged_ago, comments, additions, deletions, state)
 JOIN developers d ON d.github_username = s.developer
 WHERE r.name = 'acme-corp/platform'
   AND NOT EXISTS (SELECT 1 FROM pull_requests ep WHERE ep.repo_id = r.id AND ep.pr_number = s.num);
+
+-- Review timestamps (first review / approval) for the sample PRs.
+UPDATE pull_requests pr
+SET first_reviewed_at = COALESCE(pr.first_reviewed_at, pr.first_review_comment_at),
+    approved_at = COALESCE(pr.approved_at, LEAST(pr.last_review_comment_at + interval '30 minutes', pr.merged_at))
+FROM repositories r
+WHERE pr.repo_id = r.id AND r.name = 'acme-corp/platform' AND pr.review_decision = 'APPROVED';
+
+-- Stories behind pipeline runs (normally downloaded from the Builds API
+-- "workitems" and "changes" of each run): production deploys built the merge
+-- commits of the sample PRs; some also have work items associated by Azure
+-- DevOps, and the people's runs mention a story in a commit message.
+UPDATE azure_pipeline_runs
+SET change_shas = 'demo-merge-' || ((build_id - 5000) % 10 + 1),
+    build_work_item_ids = CASE WHEN (build_id - 5000) % 3 = 0 THEN (1000 + (build_id - 5000) % 10 + 1)::text END,
+    details_fetched_at = now() AT TIME ZONE 'UTC'
+WHERE project = 'Platform' AND build_id BETWEEN 5001 AND 5042;
+
+UPDATE azure_pipeline_runs
+SET change_work_item_refs = CASE WHEN (build_id - 5300) % 2 = 0 THEN '1013' ELSE '1014' END,
+    details_fetched_at = now() AT TIME ZONE 'UTC'
+WHERE project = 'Platform' AND build_id BETWEEN 5301 AND 5312;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import BranchSelect, { type BranchOption } from "./BranchSelect";
+import DataGrid, { type Column } from "./DataGrid";
 import { type DateRange, defaultRange, rangeLabel, rangeToApi } from "./dateRange";
 import {
   Bar,
@@ -87,6 +88,7 @@ interface LinkedPr {
   pr_number: number;
   author: string;
   merged_at: string | null;
+  sources?: string[];
 }
 
 interface Story {
@@ -180,6 +182,9 @@ interface PipelineRun {
   finish_time: string | null;
   attributed_by: string[];
   url: string | null;
+  work_items: { id: number; type: string | null; title: string | null; url: string | null; story_id: number | null; sources: string[] }[];
+  stories: number[];
+  details_fetched: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -697,42 +702,13 @@ function PeopleSection({ refreshKey }: { refreshKey: number }) {
               No teams are configured. Add people under <code>teams</code> in config.yaml to link their GitHub and Azure DevOps names.
             </p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="text-xs uppercase tracking-wide text-slate-400">
-                  <tr>
-                    <th className="py-2 pr-4">Name</th>
-                    <th className="py-2 pr-4">Team</th>
-                    <th className="py-2 pr-4">Role</th>
-                    <th className="py-2 pr-4">GitHub</th>
-                    <th className="py-2 pr-4">Azure DevOps</th>
-                    <th className="py-2 pr-4">PRs stored</th>
-                    <th className="py-2 pr-4">Work items stored</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800 text-slate-200">
-                  {mapping.people.map((person) => (
-                    <tr key={person.key}>
-                      <td className="py-2 pr-4 font-medium">{person.display_name}</td>
-                      <td className="py-2 pr-4 text-slate-400">{person.team}</td>
-                      <td className="py-2 pr-4 text-slate-400">{person.role ?? "—"}</td>
-                      <td className="py-2 pr-4">{person.github ?? <span className="text-slate-500">none</span>}</td>
-                      <td className="py-2 pr-4">
-                        {person.azure_devops.length > 0 ? (
-                          person.azure_devops.join(", ")
-                        ) : (
-                          <span className="text-slate-500" title="Matched by display name or GitHub login only">
-                            not set
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2 pr-4">{person.pull_requests}</td>
-                      <td className={`py-2 pr-4 ${person.work_items === 0 ? "text-amber-300" : ""}`}>{person.work_items}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataGrid
+              columns={PEOPLE_COLUMNS}
+              label="People and identities"
+              maxHeight="28rem"
+              rowKey={(person) => person.key}
+              rows={mapping.people}
+            />
           )}
 
           {unlinked.length > 0 && (
@@ -902,7 +878,6 @@ function StoriesSection({
   if (!data) return null;
   const { summary, efficiency, stories } = data;
   const maxCompleted = Math.max(1, ...efficiency.map((row) => row.completed));
-  const shown = stories.slice(0, 300);
 
   return (
     <>
@@ -912,7 +887,7 @@ function StoriesSection({
         <StatCard label="Throughput" value={`${summary.throughput_per_week ?? 0}/wk`} />
         <StatCard label="Median cycle time" value={formatDays(summary.median_cycle_time_days)} hint="active → closed" />
         <StatCard label="Median lead time" value={formatDays(summary.median_lead_time_days)} hint="created → closed" />
-        <StatCard label="Linked PRs" value={`${summary.linked_pr_count}`} hint="GitHub PRs mentioning AB#id" />
+        <StatCard label="Linked PRs" value={`${summary.linked_pr_count}`} hint="GitHub PRs linked to these work items" />
       </div>
 
       <Card>
@@ -927,56 +902,16 @@ function StoriesSection({
         {efficiency.length === 0 ? (
           <p className="mt-4 text-sm text-slate-500">No finished work items match the filters.</p>
         ) : (
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="text-xs uppercase tracking-wide text-slate-400">
-                <tr>
-                  <th className="py-2 pr-4">Person</th>
-                  <th className="py-2 pr-4">Role</th>
-                  <th className="py-2 pr-4">Team</th>
-                  <th className="py-2 pr-4">Finished</th>
-                  <th className="py-2 pr-4">Points</th>
-                  <th className="py-2 pr-4">Median cycle</th>
-                  <th className="py-2 pr-4">Per week</th>
-                  <th className="py-2 pr-4">Share</th>
-                  <th className="py-2 pr-4">Bugs reported</th>
-                  <th className="py-2 pr-4">PRs merged</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800">
-                {efficiency.map((row) => (
-                  <tr
-                    className="cursor-pointer text-slate-200 hover:bg-slate-800/60"
-                    key={row.person_key}
-                    onClick={() => onSelectPerson(row.person_key)}
-                  >
-                    <td className="py-2 pr-4 font-medium">{row.person}</td>
-                    <td className="py-2 pr-4">
-                      {row.role ? (
-                        <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs">{row.role}</span>
-                      ) : (
-                        <span className="text-slate-500">—</span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-4 text-slate-400">{row.team ?? "—"}</td>
-                    <td className="py-2 pr-4">
-                      <div className="flex items-center gap-2">
-                        <div className="h-2 w-24 rounded-full bg-slate-800">
-                          <div className="h-2 rounded-full bg-indigo-500" style={{ width: `${(row.completed / maxCompleted) * 100}%` }} />
-                        </div>
-                        {row.completed}
-                      </div>
-                    </td>
-                    <td className="py-2 pr-4">{row.story_points ?? 0}</td>
-                    <td className="py-2 pr-4">{formatDays(row.median_cycle_time_days)}</td>
-                    <td className="py-2 pr-4">{row.throughput_per_week ?? 0}</td>
-                    <td className="py-2 pr-4">{row.share_of_completed_pct ?? 0}%</td>
-                    <td className="py-2 pr-4">{row.bugs_reported}</td>
-                    <td className="py-2 pr-4">{row.prs_merged}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="mt-4">
+            <DataGrid
+              columns={efficiencyColumns(maxCompleted)}
+              initialSort={{ key: "completed", dir: "desc" }}
+              label="Efficiency by developer and tester"
+              maxHeight="32rem"
+              onRowClick={(row) => onSelectPerson(row.person_key)}
+              rowKey={(row) => row.person_key}
+              rows={efficiency}
+            />
           </div>
         )}
       </Card>
@@ -993,62 +928,14 @@ function StoriesSection({
         {stories.length === 0 ? (
           <p className="mt-4 text-sm text-slate-500">No work items match the filters.</p>
         ) : (
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="text-xs uppercase tracking-wide text-slate-400">
-                <tr>
-                  <th className="py-2 pr-4">ID</th>
-                  <th className="py-2 pr-4">Type</th>
-                  <th className="py-2 pr-4">Title</th>
-                  <th className="py-2 pr-4">State</th>
-                  <th className="py-2 pr-4">Assignee</th>
-                  <th className="py-2 pr-4">Tags</th>
-                  <th className="py-2 pr-4">Points</th>
-                  <th className="py-2 pr-4">Closed</th>
-                  <th className="py-2 pr-4">Cycle</th>
-                  <th className="py-2 pr-4">PRs</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800 text-slate-200">
-                {shown.map((story) => (
-                  <tr key={story.id}>
-                    <td className="py-2 pr-4">
-                      {story.url ? (
-                        <a className="text-sky-300 hover:underline" href={story.url} rel="noreferrer" target="_blank">
-                          {story.id}
-                        </a>
-                      ) : (
-                        story.id
-                      )}
-                    </td>
-                    <td className="py-2 pr-4 text-slate-400">{story.type}</td>
-                    <td className="max-w-md py-2 pr-4">{story.title}</td>
-                    <td className="py-2 pr-4 text-slate-400">{story.state ?? "—"}</td>
-                    <td className="py-2 pr-4">{story.assignee ?? "—"}</td>
-                    <td className="py-2 pr-4">
-                      <div className="flex flex-wrap gap-1">
-                        {story.tags.map((tag) => (
-                          <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-300" key={tag}>
-                            {tag}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="py-2 pr-4">{story.story_points ?? "—"}</td>
-                    <td className="py-2 pr-4 text-slate-400">{story.closed_date?.slice(0, 10) ?? "open"}</td>
-                    <td className="py-2 pr-4">{formatDays(story.cycle_time_days)}</td>
-                    <td className="py-2 pr-4 text-slate-400">
-                      {story.linked_prs.map((pr) => `#${pr.pr_number}`).join(", ") || "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {stories.length > shown.length && (
-              <p className="mt-3 text-xs text-slate-500">
-                Showing the first {shown.length}; download the CSV for all {stories.length} items.
-              </p>
-            )}
+          <div className="mt-4">
+            <DataGrid
+              columns={WORK_ITEM_COLUMNS}
+              label="Work items"
+              minWidth="64rem"
+              rowKey={(story) => story.id}
+              rows={stories}
+            />
           </div>
         )}
       </Card>
@@ -1063,80 +950,289 @@ const RESULT_STYLES: Record<string, string> = {
   canceled: "text-slate-400",
 };
 
+const stopClick = (event: { stopPropagation: () => void }) => event.stopPropagation();
+
 function PipelineRunsTable({ dora }: { dora: DoraResponse }) {
-  const [onlyDeployments, setOnlyDeployments] = useState(false);
-  const runs = onlyDeployments ? dora.runs.filter((run) => run.is_production_deployment) : dora.runs;
   const scoped = dora.scope.kind !== "all";
+  const detailsMissing = dora.runs.some((run) => !run.details_fetched);
+  const columns: Column<PipelineRun>[] = [
+    {
+      key: "finished",
+      header: "Finished",
+      value: (run) => run.finish_time ?? "",
+      filter: "none",
+      render: (run) => <span className="whitespace-nowrap">{run.finish_time ? new Date(`${run.finish_time}Z`).toLocaleString() : "—"}</span>,
+    },
+    {
+      key: "pipeline",
+      header: "Pipeline",
+      value: (run) => run.pipeline,
+      filter: "select",
+      render: (run) => (
+        <>
+          {run.pipeline}
+          {run.is_production_deployment && (
+            <span className="ml-2 rounded-full border border-indigo-500/40 px-1.5 py-0.5 text-[10px] text-indigo-300">deploy</span>
+          )}
+        </>
+      ),
+    },
+    {
+      key: "type",
+      header: "Kind",
+      value: (run) => (run.is_production_deployment ? "Production deployment" : "Other run"),
+      filter: "select",
+      render: (run) => <span className="text-slate-400">{run.is_production_deployment ? "deployment" : "build"}</span>,
+    },
+    {
+      key: "build",
+      header: "Build",
+      value: (run) => run.build_number ?? String(run.id),
+      render: (run) =>
+        run.url ? (
+          <a className="text-sky-300 hover:underline" href={run.url} onClick={stopClick} rel="noreferrer" target="_blank">
+            {run.build_number ?? run.id}
+          </a>
+        ) : (
+          run.build_number ?? run.id
+        ),
+    },
+    {
+      key: "result",
+      header: "Result",
+      value: (run) => run.result ?? "",
+      filter: "select",
+      render: (run) => <span className={RESULT_STYLES[(run.result ?? "").toLowerCase()] ?? "text-slate-400"}>{run.result ?? "—"}</span>,
+    },
+    {
+      key: "stories",
+      header: "Stories",
+      value: (run) => run.stories.join(", "),
+      filter: "select",
+      filterValues: (run) => (run.stories.length ? run.stories.map(String) : ["No story"]),
+      title: "Stories behind the run: work items Azure DevOps associates with it, AB# in its commits, and stories of the PRs it built",
+      render: (run) =>
+        run.work_items.length ? (
+          <div className="flex flex-wrap gap-1">
+            {run.work_items.map((item) => (
+              <a
+                className="rounded border border-slate-700 px-1.5 py-0.5 font-mono text-[11px] text-sky-300 hover:underline"
+                href={item.url ?? undefined}
+                key={item.id}
+                onClick={stopClick}
+                rel="noreferrer"
+                target="_blank"
+                title={`${item.type ?? ""} ${item.title ?? ""}${item.story_id && item.story_id !== item.id ? ` (story #${item.story_id})` : ""} · ${item.sources.join(", ")}`}
+              >
+                #{item.id}
+                {item.story_id && item.story_id !== item.id ? ` → #${item.story_id}` : ""}
+              </a>
+            ))}
+          </div>
+        ) : (
+          <span className="text-slate-500">—</span>
+        ),
+    },
+    {
+      key: "repository",
+      header: "Repository / branch",
+      value: (run) => `${run.repository ?? ""} ${run.source_branch ?? ""}`,
+      render: (run) => (
+        <>
+          {run.repository ?? "—"}
+          {run.source_branch && <span className="block text-slate-500">{run.source_branch.replace(/^refs\/heads\//, "")}</span>}
+        </>
+      ),
+    },
+    { key: "requested", header: "Requested for", value: (run) => run.requested_for ?? "", filter: "select" },
+  ];
+  if (scoped) {
+    columns.push({
+      key: "why",
+      header: "Why it is included",
+      value: (run) => run.attributed_by.join("; "),
+      render: (run) => <span className="text-slate-400">{run.attributed_by.join("; ") || "—"}</span>,
+    });
+  }
   return (
     <div className="mt-6 border-t border-slate-800 pt-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h4 className="text-sm font-semibold text-slate-100">Pipeline runs ({dora.runs_total})</h4>
-          <p className="text-xs text-slate-500">
-            {scoped
-              ? "Runs requested for the selection, runs that built or validated their pull requests, and the deployments that shipped them."
-              : "Every completed run in the range."}
-            {dora.runs_total > dora.runs.length ? ` Showing the latest ${dora.runs.length}.` : ""}
-          </p>
-        </div>
-        <label className="flex items-center gap-2 text-xs text-slate-400">
-          <input
-            checked={onlyDeployments}
-            className="h-4 w-4 accent-indigo-500"
-            onChange={(e) => setOnlyDeployments(e.target.checked)}
-            type="checkbox"
-          />
-          Production deployments only
-        </label>
-      </div>
-      {runs.length === 0 ? (
-        <p className="mt-3 text-sm text-slate-500">No pipeline runs for this selection in the date range.</p>
-      ) : (
-        <div className="mt-3 max-h-96 overflow-auto rounded-lg border border-slate-800">
-          <table className="w-full min-w-[48rem] text-left text-xs">
-            <thead className="sticky top-0 bg-slate-900 text-slate-400">
-              <tr>
-                <th className="px-3 py-2 font-medium">Finished</th>
-                <th className="px-3 py-2 font-medium">Pipeline</th>
-                <th className="px-3 py-2 font-medium">Build</th>
-                <th className="px-3 py-2 font-medium">Result</th>
-                <th className="px-3 py-2 font-medium">Repository / branch</th>
-                <th className="px-3 py-2 font-medium">Requested for</th>
-                {scoped && <th className="px-3 py-2 font-medium">Why it is included</th>}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800 text-slate-300">
-              {runs.map((run) => (
-                <tr key={run.id}>
-                  <td className="whitespace-nowrap px-3 py-2">{run.finish_time ? new Date(`${run.finish_time}Z`).toLocaleString() : "—"}</td>
-                  <td className="px-3 py-2">
-                    {run.pipeline}
-                    {run.is_production_deployment && (
-                      <span className="ml-2 rounded-full border border-indigo-500/40 px-1.5 py-0.5 text-[10px] text-indigo-300">deploy</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    {run.url ? (
-                      <a className="text-sky-300 hover:underline" href={run.url} rel="noreferrer" target="_blank">
-                        {run.build_number ?? run.id}
-                      </a>
-                    ) : (
-                      run.build_number ?? run.id
-                    )}
-                  </td>
-                  <td className={`px-3 py-2 ${RESULT_STYLES[(run.result ?? "").toLowerCase()] ?? "text-slate-400"}`}>{run.result ?? "—"}</td>
-                  <td className="px-3 py-2">
-                    {run.repository ?? "—"}
-                    {run.source_branch && <span className="block text-slate-500">{run.source_branch.replace(/^refs\/heads\//, "")}</span>}
-                  </td>
-                  <td className="px-3 py-2">{run.requested_for ?? "—"}</td>
-                  {scoped && <td className="px-3 py-2 text-slate-400">{run.attributed_by.join("; ") || "—"}</td>}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <h4 className="text-sm font-semibold text-slate-100">Pipeline runs ({dora.runs_total})</h4>
+      <p className="mb-2 text-xs text-slate-500">
+        {scoped
+          ? "Runs requested for the selection, runs that built or validated their pull requests, and the deployments that shipped them."
+          : "Every completed run in the range."}
+        {dora.runs_total > dora.runs.length ? ` Showing the latest ${dora.runs.length}.` : ""} Stories come from the work items Azure
+        DevOps associates with each run, AB# in the commits it built, and the stories of the PRs it built.
+        {detailsMissing ? " Some runs were synced before story lookup was added: sync Azure DevOps again to fill them in." : ""}
+      </p>
+      <DataGrid
+        columns={columns}
+        emptyMessage="No pipeline runs for this selection in the date range."
+        initialSort={{ key: "finished", dir: "desc" }}
+        label="Pipeline runs"
+        maxHeight="30rem"
+        minWidth="64rem"
+        rowKey={(run) => run.id}
+        rows={dora.runs}
+      />
     </div>
   );
 }
+
+type Person = PeopleMapping["people"][number];
+
+const PEOPLE_COLUMNS: Column<Person>[] = [
+  { key: "name", header: "Name", value: (p) => p.display_name, className: "font-medium text-slate-100" },
+  { key: "team", header: "Team", value: (p) => p.team, filter: "select" },
+  { key: "role", header: "Role", value: (p) => p.role ?? "", filter: "select" },
+  {
+    key: "github",
+    header: "GitHub",
+    value: (p) => p.github ?? "",
+    render: (p) => p.github ?? <span className="text-slate-500">none</span>,
+  },
+  {
+    key: "azure",
+    header: "Azure DevOps",
+    value: (p) => p.azure_devops.join(", "),
+    render: (p) =>
+      p.azure_devops.length ? (
+        p.azure_devops.join(", ")
+      ) : (
+        <span className="text-slate-500" title="Matched by display name or GitHub login only">
+          not set
+        </span>
+      ),
+  },
+  { key: "prs", header: "PRs stored", value: (p) => p.pull_requests, filter: "number" },
+  {
+    key: "work_items",
+    header: "Work items stored",
+    value: (p) => p.work_items,
+    filter: "number",
+    render: (p) => <span className={p.work_items === 0 ? "text-amber-300" : ""}>{p.work_items}</span>,
+  },
+];
+
+function efficiencyColumns(maxCompleted: number): Column<EfficiencyRow>[] {
+  return [
+    { key: "person", header: "Person", value: (row) => row.person, className: "font-medium text-slate-100" },
+    {
+      key: "role",
+      header: "Role",
+      value: (row) => row.role ?? "",
+      filter: "select",
+      render: (row) =>
+        row.role ? <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs">{row.role}</span> : <span className="text-slate-500">—</span>,
+    },
+    { key: "team", header: "Team", value: (row) => row.team ?? "", filter: "select" },
+    {
+      key: "completed",
+      header: "Finished",
+      value: (row) => row.completed,
+      filter: "number",
+      render: (row) => (
+        <div className="flex items-center gap-2">
+          <div className="h-2 w-24 rounded-full bg-slate-800">
+            <div className="h-2 rounded-full bg-indigo-500" style={{ width: `${(row.completed / maxCompleted) * 100}%` }} />
+          </div>
+          {row.completed}
+        </div>
+      ),
+    },
+    { key: "points", header: "Points", value: (row) => row.story_points ?? 0, filter: "number" },
+    {
+      key: "cycle",
+      header: "Median cycle (d)",
+      value: (row) => row.median_cycle_time_days,
+      filter: "number",
+      render: (row) => formatDays(row.median_cycle_time_days),
+    },
+    { key: "per_week", header: "Per week", value: (row) => row.throughput_per_week ?? 0, filter: "number" },
+    {
+      key: "share",
+      header: "Share %",
+      value: (row) => row.share_of_completed_pct ?? 0,
+      filter: "number",
+      render: (row) => `${row.share_of_completed_pct ?? 0}%`,
+    },
+    { key: "bugs", header: "Bugs reported", value: (row) => row.bugs_reported, filter: "number" },
+    { key: "prs", header: "PRs merged", value: (row) => row.prs_merged, filter: "number" },
+  ];
+}
+
+const WORK_ITEM_COLUMNS: Column<Story>[] = [
+  {
+    key: "id",
+    header: "ID",
+    value: (story) => story.id,
+    render: (story) =>
+      story.url ? (
+        <a className="text-sky-300 hover:underline" href={story.url} rel="noreferrer" target="_blank">
+          {story.id}
+        </a>
+      ) : (
+        story.id
+      ),
+  },
+  { key: "type", header: "Type", value: (story) => story.type, filter: "select" },
+  { key: "title", header: "Title", value: (story) => story.title, className: "max-w-md" },
+  { key: "state", header: "State", value: (story) => story.state ?? "", filter: "select" },
+  { key: "assignee", header: "Assignee", value: (story) => story.assignee ?? "", filter: "select" },
+  {
+    key: "tags",
+    header: "Tags",
+    value: (story) => story.tags.join(", "),
+    filter: "select",
+    filterValues: (story) => story.tags,
+    render: (story) => (
+      <div className="flex flex-wrap gap-1">
+        {story.tags.map((tag) => (
+          <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-300" key={tag}>
+            {tag}
+          </span>
+        ))}
+      </div>
+    ),
+  },
+  { key: "points", header: "Points", value: (story) => story.story_points, filter: "number" },
+  {
+    key: "closed",
+    header: "Closed",
+    value: (story) => story.closed_date ?? "",
+    render: (story) => <span className="text-slate-400">{story.closed_date?.slice(0, 10) ?? "open"}</span>,
+  },
+  {
+    key: "cycle",
+    header: "Cycle (d)",
+    value: (story) => story.cycle_time_days,
+    filter: "number",
+    render: (story) => formatDays(story.cycle_time_days),
+  },
+  {
+    key: "prs",
+    header: "PRs",
+    value: (story) => story.linked_prs.length,
+    filter: "number",
+    title: "Linked PRs (hover for how each was linked); filter 0 for work items without code",
+    render: (story) =>
+      story.linked_prs.length ? (
+        <div className="flex flex-wrap gap-1">
+          {story.linked_prs.map((pr) => (
+            <a
+              className="font-mono text-xs text-sky-300 hover:underline"
+              href={`https://github.com/${pr.repository}/pull/${pr.pr_number}`}
+              key={`${pr.repository}#${pr.pr_number}`}
+              rel="noreferrer"
+              target="_blank"
+              title={`${pr.repository}#${pr.pr_number} by ${pr.author}${pr.sources?.length ? ` · ${pr.sources.join(", ")}` : ""}`}
+            >
+              #{pr.pr_number}
+            </a>
+          ))}
+        </div>
+      ) : (
+        <span className="text-slate-500">—</span>
+      ),
+  },
+];

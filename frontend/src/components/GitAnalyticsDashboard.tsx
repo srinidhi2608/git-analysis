@@ -15,6 +15,7 @@ import {
 import BranchSelect, { type BranchOption } from "./BranchSelect";
 import DevOpsIntegrationPage from "./DevOpsIntegrationPage";
 import StoryQualityPage from "./StoryQualityPage";
+import PullRequestTimeline from "./PullRequestTimeline";
 import DateTimeRangePicker from "./DateTimeRangePicker";
 import { type DateRange, defaultRange, rangeShortLabel, rangeToApi, readStoredRange, storeRange } from "./dateRange";
 
@@ -1644,6 +1645,8 @@ export default function GitAnalyticsDashboard() {
             </div>
           </div>
         </div>
+
+        {isTeamView && <PullRequestTimeline branches={selectedBranches} dateRange={dateRange} team={selectedTeam} />}
 
         {!isTeamView && (
           <IndividualPerformancePanel

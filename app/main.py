@@ -33,6 +33,8 @@ from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_s
 from app.teams import load_team_config
 from app.time_window import TimeWindow
 from app.lifecycle_config import load_lifecycle_config
+from app.pr_timeline import build_pr_rows, pr_timeline_csv, summarize_prs
+from app.work_item_links import LinkIndex
 from app.story_lifecycle import (
     build_story_lifecycles,
     lifecycle_csv,
@@ -995,6 +997,51 @@ def story_lifecycle(filters: StoryFilters = Depends(story_filters), db: Session 
         "summary": summarize_lifecycles(rows, config),
         "stories": rows,
     }
+
+
+def _pull_request_rows(db: Session, window: TimeWindow, team: str | None, branches: list[str] | None):
+    return build_pr_rows(
+        db,
+        window,
+        load_team_config(),
+        LinkIndex(db, load_lifecycle_config()),
+        devops_config=load_devops_config(),
+        teams=_resolve_teams(team),
+        branches=branches,
+    )
+
+
+@app.get("/api/pull-requests")
+def pull_request_timeline(
+    team: str | None = None,
+    window: TimeWindow = Depends(time_window),
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
+    """PRs created or merged in the range, with their phase timeline, linked stories and flags."""
+    rows, deployments_configured = _pull_request_rows(db, window, team, branches)
+    return {
+        "window": window.describe(),
+        "summary": summarize_prs(rows, deployments_configured),
+        "pull_requests": rows,
+    }
+
+
+@app.get("/api/reports/pull-requests.csv")
+def pull_request_report(
+    team: str | None = None,
+    window: TimeWindow = Depends(time_window),
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
+    """CSV of the PR timeline grid (same filters)."""
+    rows, _ = _pull_request_rows(db, window, team, branches)
+    stamp = f"{window.start:%Y%m%d}-{window.end:%Y%m%d}"
+    return Response(
+        pr_timeline_csv(rows),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="pull-requests-{stamp}.csv"'},
+    )
 
 
 STORY_REPORTS = {

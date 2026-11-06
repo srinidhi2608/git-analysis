@@ -10,6 +10,8 @@ From these it derives quality signals: time in each stage, rework, integrity che
 
 This guide covers what is built, how every number is calculated, and how to configure it.
 
+See also [pull-request-timeline.md](pull-request-timeline.md): the per-PR view (including PRs without a story), the stories behind pipeline runs, and how to sort and filter grids.
+
 **Contents**
 
 1. [What you get](#1-what-you-get)
@@ -32,7 +34,7 @@ This guide covers what is built, how every number is calculated, and how to conf
 | **Summary tiles** | Number of stories and their outcome (released / closed without release / in progress), first-time-right rate, QA bounce rate, reopen rate, median lead and cycle time, flow efficiency and code share |
 | **Median time per stage** | For every non-final stage (New, Development, QA, QAA, INT, and the waiting states), the median time stories spent there. Also shows bugs per 1,000 changed lines, escaped defects and stories per release version |
 | **Stories table** | One row per story: outcome, a timeline bar coloured by stage, lead time (or age if still open), PRs, lines changed, rework count and flags. **Click a row** to see its full state history with dates, durations and assignees, the activity metrics, developers and testers, and every linked PR with how it was linked |
-| **Filters** | The date range at the top of the page, plus: finished stories only or also in progress, team, developer/tester, tag, flag, and a title/ID search |
+| **Filters** | The date range at the top of the page, plus: finished stories only or also in progress, team, developer/tester and tag. In the grid, sort by any column and filter each column: outcome, release, developers, testers, flags, numbers such as `Lead (h) >100` (see [grids](pull-request-timeline.md#4-sorting-and-filtering-grids)) |
 | **CSV buttons** | Stories, state changes, and story–PR links, each with the same filters (section 7) |
 
 **Which stories are included.** Work items of the configured story types (`User Story` and `Product Backlog Item` by default).

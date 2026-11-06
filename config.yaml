@@ -36,6 +36,7 @@ repositories:
 #   incidents:                                 # optional: work items that are incidents
 #     work_item_types: ["Bug"]
 #     tags: ["Incident"]
+#   run_details: true                          # fetch each new run's work items + commits (stories per run)
 
 # Optional: Story Quality page (story lifecycle). The defaults below match a
 # New → Active → QA Dev → QAA → INT → Released / Closed board; change them to

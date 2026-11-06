@@ -255,6 +255,8 @@ def run_ingestion(
                     head_branch=pr_data.get("head_branch"),
                     github_id=pr_data.get("github_id"),
                     work_item_refs=pr_data.get("work_item_refs"),
+                    first_reviewed_at=_parse_dt(pr_data.get("first_reviewed_at")),
+                    approved_at=_parse_dt(pr_data.get("approved_at")),
                 )
                 db.add(pull_request)
                 db.flush()
@@ -284,6 +286,9 @@ def run_ingestion(
                 existing.closed_at = _parse_dt(pr_data.get("closed_at")) or existing.closed_at
                 existing.head_branch = pr_data.get("head_branch") or existing.head_branch
                 existing.github_id = pr_data.get("github_id") or existing.github_id
+                if "first_reviewed_at" in pr_data:
+                    existing.first_reviewed_at = _parse_dt(pr_data.get("first_reviewed_at"))
+                    existing.approved_at = _parse_dt(pr_data.get("approved_at"))
                 if "work_item_refs" in pr_data:
                     existing.work_item_refs = pr_data["work_item_refs"]
 

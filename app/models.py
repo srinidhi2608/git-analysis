@@ -68,6 +68,9 @@ class PullRequest(Base):
     github_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
     # Azure work item ids mentioned as AB#<id> in the PR title or description, comma-separated.
     work_item_refs: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    # First review submitted by someone other than the author, and first approval.
+    first_reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     repository: Mapped["Repository"] = relationship("Repository", back_populates="pull_requests")
     developer: Mapped["Developer"] = relationship("Developer", back_populates="pull_requests")
@@ -230,3 +233,10 @@ class AzurePipelineRun(Base):
     start_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finish_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
     url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    # From the Builds API "workitems" and "changes" of the run (comma-separated):
+    # work items Azure DevOps associates with the run, the commits it built, and
+    # AB#<id> references in those commit messages.
+    build_work_item_ids: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    change_shas: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    change_work_item_refs: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    details_fetched_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

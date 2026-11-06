@@ -53,6 +53,8 @@ WORK_ITEM_FIELDS = [
     "System.Parent",
 ]
 UPDATES_PAGE_SIZE = 200
+AB_REFERENCE = re.compile(r"AB#(\d+)", re.IGNORECASE)
+GIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
 WORK_ITEM_URL = re.compile(r"/workItems/(\d+)$", re.IGNORECASE)
 
 
@@ -250,6 +252,28 @@ class AzureDevOpsClient:
             continuation = response.headers.get("x-ms-continuationtoken")
             if not continuation:
                 return runs
+
+    def fetch_run_details(self, project: str, build_id: int) -> dict[str, list]:
+        """Work items Azure DevOps associates with a run, and the commits it built.
+
+        ``workitems`` lists the work items linked to the run's commits / PRs;
+        ``changes`` lists the commits since the previous run of the pipeline.
+        """
+        items = self._request(
+            "GET", self._project_url(project, f"build/builds/{build_id}/workitems"), params={"$top": 200}
+        ).json().get("value", [])
+        changes = self._request(
+            "GET", self._project_url(project, f"build/builds/{build_id}/changes"), params={"$top": 200}
+        ).json().get("value", [])
+        # Git commits (GitHub, Azure Repos) have a SHA id; TFVC changesets do not.
+        commits = [change for change in changes if GIT_SHA.fullmatch(str(change.get("id") or ""))]
+        return {
+            "work_item_ids": [int(item["id"]) for item in items if str(item.get("id", "")).isdigit()],
+            "commit_shas": [str(change["id"]).lower() for change in commits if change.get("id")],
+            "work_item_refs": sorted(
+                {int(match) for change in commits for match in AB_REFERENCE.findall(change.get("message") or "")}
+            ),
+        }
 
     def normalize_run(self, project: str, raw: dict[str, Any]) -> dict[str, Any]:
         definition = raw.get("definition") or {}

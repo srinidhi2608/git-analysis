@@ -17,6 +17,9 @@ Example config.yaml::
       incidents:
         work_item_types: ["Bug"]
         tags: ["Incident"]
+      # Download each new pipeline run's associated work items and commits
+      # (Builds API, 2 requests per run, once) to show its stories. Default true.
+      run_details: true
 
 The personal access token is a secret and goes in .env as AZURE_DEVOPS_PAT.
 """
@@ -65,6 +68,8 @@ class DevOpsConfig:
     production_pattern: str = ""
     incident_work_item_types: list[str] = field(default_factory=list)
     incident_tags: list[str] = field(default_factory=list)
+    # Download each new pipeline run's associated work items and commits (2 requests per run, once).
+    run_details: bool = True
     pat: str = field(default="", repr=False)
 
     @property
@@ -129,6 +134,7 @@ def parse_devops_config(data: dict | None, pat: str | None = None) -> DevOpsConf
         production_pattern=str(raw.get("production_pattern") or ""),
         incident_work_item_types=_string_list(incidents.get("work_item_types")),
         incident_tags=_string_list(incidents.get("tags")),
+        run_details=bool(raw.get("run_details", True)),
         pat=(pat if pat is not None else settings.azure_devops_pat) or "",
     )
     types = _string_list(raw.get("work_item_types"))

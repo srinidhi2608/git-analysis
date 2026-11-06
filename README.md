@@ -7,6 +7,8 @@ It pulls PRs, reviews, review comments and commits for the repositories you choo
 - **Team overview**: for all teams or one selected team, PR cycle time, merged PRs per week, and **DORA-inspired delivery metrics** (merge frequency, lead time, time to first review, review coverage, approval rate, change-failure proxy, recovery time) with weekly trends.
 - **Individual performance**: for each developer, PR size, review-comment density, requested-changes rate, rework after feedback, follow-up speed, recurring review themes, top reviewers and the languages they work in.
 - **DevOps Integration (optional)**: connects **Azure Boards** (user stories, bugs, tasks) and **Azure Pipelines** (deployments) to the GitHub data. You can filter stories by tag, date range, team or person, export reports, see each developer's and tester's delivery, and get **DORA metrics** (deployment frequency, lead time for changes, change failure rate, failed deployment recovery time) for the team or a single person. The definitions follow [Apache DevLake](https://devlake.apache.org/).
+- **Pull request timeline**: on Team Overview, every PR with its phases (coding, waiting for review, in review, waiting to merge, waiting to deploy), the stories it belongs to, and flags. It finds **PRs with no story**, unreviewed merges and PRs never deployed. Downloadable as CSV. See [docs/pull-request-timeline.md](docs/pull-request-timeline.md).
+- **Sortable, filterable grids**: click any column header to sort; filter every column (text, value lists, number ranges such as `>5` or `1-10`).
 - **Story Quality (optional, with Azure DevOps)**: every user story's lifecycle from creation to release: time in each stage (Dev, QA, QAA, INT), linked pull requests, developers and testers, rework, integrity flags, and how much of the story's time went into code. Downloadable as CSV. See [docs/story-lifecycle.md](docs/story-lifecycle.md).
 - **AI summary (optional)**: written strengths, improvement areas, design-pattern and DRY/WET notes. These come from an online LLM (OpenAI or Gemini) or a local [Ollama](https://ollama.com) model, based on the actual review comments. A rule-based fallback always works, so no AI setup is required.
 
@@ -495,6 +497,9 @@ azure_devops:
   incidents:
     work_item_types: ["Bug"]
     tags: ["Incident"]
+  # Download each new pipeline run's associated work items and commits (2 requests per run,
+  # once) to show the stories behind it. Default true.
+  run_details: true
 ```
 
 **Step 4: Link people across GitHub and Azure DevOps**
@@ -606,6 +611,17 @@ All of it downloads as CSV: stories, state changes, and story–PR links.
 3. Run one **Sync from GitHub** with **Full refresh on sync**.
 
 **Read [docs/story-lifecycle.md](docs/story-lifecycle.md)** for the full guide: configuration, how PRs are linked to stories, every definition and flag, the CSV columns, the API, and troubleshooting.
+
+### 7.6 Stories behind PRs and pipeline runs
+
+GitHub pull requests and Azure Pipelines runs are linked to Azure Boards work items, and through them to stories:
+
+- **A PR** is linked by any of: an Azure Boards GitHub link; `AB#<id>` in its title, description or commits; or the id in its branch name. A child Task or Bug links it to the parent story too.
+- **A pipeline run** is linked by any of: the work items Azure DevOps associates with the run; `AB#<id>` in the commits it built; or the stories of the PRs whose commits it built. These show in the **Stories** column of the Pipeline runs grid.
+
+The **Pull request timeline** on Team Overview lists every PR with its phases and stories, and finds PRs without one (filter **Stories → No story**).
+
+Full details, including how to sort and filter every grid: [docs/pull-request-timeline.md](docs/pull-request-timeline.md).
 
 ## 8) Production deployment (HTTPS, certificates, hardening)
 
@@ -730,6 +746,8 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/devops/stories` | Filtered work items + summary + efficiency by person |
 | GET | `/api/devops/dora` | DORA metrics for everyone, `?team=` or `?person=`, plus the pipeline runs behind them (`runs`, with `attributed_by`) |
 | GET | `/api/devops/report` | Download `?format=csv` or `?format=markdown` for the filtered work items |
+| GET | `/api/pull-requests` | PR timeline rows (phases, stories, work items, flags) and summary; `date_from`/`date_to` (or `days`), `team`, `branches` ([guide](docs/pull-request-timeline.md#6-api-and-csv)) |
+| GET | `/api/reports/pull-requests.csv` | PR timeline CSV |
 | GET | `/api/stories/lifecycle` | Story lifecycle rows (timeline, PRs, people, rework, flags) and summary; same filters as the DevOps endpoints plus `status=completed\|all` ([guide](docs/story-lifecycle.md#8-api)) |
 | GET | `/api/reports/{story-lifecycle\|story-transitions\|story-pull-requests}.csv` | Story CSV reports |
 | POST | `/api/snapshots/load` | Load the newest snapshot (or `{"name": ...}`), upserting into the database |
@@ -785,6 +803,8 @@ app/
   devops_metrics.py     Story filters, efficiency, DORA (DevLake definitions), reports
   lifecycle_config.py   `lifecycle` settings: board states → stages, release tag pattern
   story_lifecycle.py    Story lifecycle rows, story ↔ PR links, quality flags, CSV reports
+  work_item_links.py    Work item ↔ PR / commit / pipeline run index (stories behind PRs and runs)
+  pr_timeline.py        Pull request timeline rows, phases, flags, CSV
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
@@ -795,8 +815,8 @@ app/
   developer_analytics.py  Per-developer review analytics + narrative
   ai_analyzers.py       Online LLM → Ollama → rule-based analyzer
 frontend/               React + Vite dashboard (src/components: GitAnalyticsDashboard, DevOpsIntegrationPage,
-                        StoryQualityPage, DateTimeRangePicker + dateRange.ts, BranchSelect)
-docs/                   story-lifecycle.md (Story Quality guide)
+                        StoryQualityPage, PullRequestTimeline, DataGrid, DateTimeRangePicker + dateRange.ts, BranchSelect)
+docs/                   story-lifecycle.md (Story Quality), pull-request-timeline.md (PR timeline, links, grids)
 scripts/                seed_data.sql (demo data), seed_devops.sql (Azure demo data), clear_data.sql (wipe data)
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse
@@ -838,6 +858,7 @@ npm run build
 | `SSL: CERTIFICATE_VERIFY_FAILED` when syncing | A corporate proxy or self-hosted GitHub/Azure DevOps uses a private CA: put its certificate in `certs/ca/` and restart |
 | Browser shows a certificate warning | The certificate isn't trusted by the browser (self-signed), or its name doesn't match the URL; use a certificate for the host name you open |
 | Selecting a target branch hides older PRs | They were synced before target branches were recorded: run a GitHub sync with **Full refresh on sync** |
+| Most PRs show "No story", or pipeline runs show no stories | Sync Azure DevOps (work items, and each run's work items and commits) and run one GitHub sync with **Full refresh on sync**. See [the PR timeline guide's troubleshooting](docs/pull-request-timeline.md#7-troubleshooting) |
 | Story Quality shows no stories, or warns about unmapped states | Run **Sync Azure DevOps** (it downloads state history), choose **Also in progress**, and map every board state under `lifecycle.stages` in `config.yaml`. See [the guide's troubleshooting](docs/story-lifecycle.md#10-troubleshooting) |
 | DevOps page says "Not configured" | Set `AZURE_DEVOPS_PAT` in `.env` and `azure_devops.organization` / `projects` in `config.yaml`, then restart (section 7.2) |
 | Azure sync fails with "rejected the credentials" | The PAT is expired, belongs to another organization, or lacks the **Work Items: Read** / **Build: Read** scopes |

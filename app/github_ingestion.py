@@ -350,6 +350,14 @@ query({", ".join(variable_definitions)}) {{
         )
 
         approvals_count = sum(1 for review in review_nodes if review.get("state") == "APPROVED")
+        reviews_by_others = [
+            review for review in review_nodes
+            if (review.get("author") or {}).get("login") != author_login and review.get("submittedAt")
+        ]
+        first_reviewed_at = min((review["submittedAt"] for review in reviews_by_others), default=None)
+        approved_at = min(
+            (review["submittedAt"] for review in reviews_by_others if review.get("state") == "APPROVED"), default=None
+        )
         requested_changes_count = sum(
             1 for review in review_nodes if review.get("state") == "CHANGES_REQUESTED"
         )
@@ -462,6 +470,8 @@ query({", ".join(variable_definitions)}) {{
             "github_id": int(node["fullDatabaseId"]) if node.get("fullDatabaseId") else None,
             # Only the AB#<id> work item references are kept from the description.
             "work_item_refs": work_item_refs(node.get("title"), node.get("body")),
+            "first_reviewed_at": first_reviewed_at,
+            "approved_at": approved_at,
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
             "changed_files": node.get("changedFiles") or 0,

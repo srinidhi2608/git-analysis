@@ -1,4 +1,5 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import DataGrid, { type Column } from "./DataGrid";
 import { type DateRange, rangeLabel, rangeToApi } from "./dateRange";
 
 // ---------------------------------------------------------------------------
@@ -214,9 +215,6 @@ export default function StoryQualityPage({ dateRange }: { dateRange: DateRange }
   const [person, setPerson] = useState("");
   const [tag, setTag] = useState("");
   const [status, setStatus] = useState<"completed" | "all">("completed");
-  const [flag, setFlag] = useState("");
-  const [search, setSearch] = useState("");
-  const [expanded, setExpanded] = useState<number | null>(null);
 
   const [options, setOptions] = useState<FilterOptions | null>(null);
   const [data, setData] = useState<LifecycleResponse | null>(null);
@@ -276,14 +274,120 @@ export default function StoryQualityPage({ dateRange }: { dateRange: DateRange }
     return colors;
   }, [stages]);
 
-  const stories = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return (data?.stories ?? []).filter(
-      (row) =>
-        (!flag || row.flags.includes(flag)) &&
-        (!term || row.title.toLowerCase().includes(term) || String(row.id).includes(term)),
-    );
-  }, [data, flag, search]);
+  const stories = useMemo(() => data?.stories ?? [], [data]);
+
+  const columns = useMemo<Column<StoryRow>[]>(
+    () => [
+      {
+        key: "story",
+        header: "Story",
+        value: (row) => `#${row.id} ${row.title}`,
+        className: "min-w-[18rem]",
+        render: (row) => (
+          <div>
+            <span className="font-mono text-xs text-slate-500">#{row.id}</span> <span className="text-slate-100">{row.title}</span>
+            <span className="mt-0.5 block text-xs text-slate-500">
+              {row.story_points != null ? `${row.story_points} pts · ` : ""}
+              {row.state}
+            </span>
+          </div>
+        ),
+      },
+      {
+        key: "outcome",
+        header: "Outcome",
+        value: (row) => OUTCOME_LABELS[row.outcome],
+        filter: "select",
+        render: (row) => (
+          <span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-xs ${OUTCOME_STYLES[row.outcome]}`}>{OUTCOME_LABELS[row.outcome]}</span>
+        ),
+      },
+      { key: "release", header: "Release", value: (row) => row.release_version ?? "", filter: "select" },
+      {
+        key: "timeline",
+        header: "Timeline",
+        value: (row) => row.lead_time_hours ?? row.age_hours,
+        filter: "none",
+        className: "w-[18rem]",
+        render: (row) => <TimelineBar row={row} stageColor={stageColor} />,
+      },
+      {
+        key: "lead",
+        header: "Lead (h)",
+        value: (row) => (row.outcome === "in_progress" ? row.age_hours : row.lead_time_hours),
+        filter: "number",
+        title: "Created → released, or age for stories in progress, in hours",
+        render: (row) => (
+          <span className="whitespace-nowrap font-mono text-xs tabular-nums">
+            {row.outcome === "in_progress" ? `${days(row.age_hours)} old` : days(row.lead_time_hours)}
+          </span>
+        ),
+      },
+      {
+        key: "developers",
+        header: "Developers",
+        value: (row) => row.developers.map((p) => p.name).join(", "),
+        filter: "select",
+        filterValues: (row) => row.developers.map((p) => p.name),
+        className: "text-xs",
+      },
+      {
+        key: "testers",
+        header: "Testers",
+        value: (row) => row.testers.map((p) => p.name).join(", "),
+        filter: "select",
+        filterValues: (row) => row.testers.map((p) => p.name),
+        className: "text-xs",
+      },
+      {
+        key: "prs",
+        header: "PRs",
+        value: (row) => row.pr_count,
+        filter: "number",
+        render: (row) => (
+          <span className="whitespace-nowrap text-xs">
+            {row.prs_merged} merged
+            {row.prs_open ? <span className="text-amber-300"> · {row.prs_open} open</span> : null}
+          </span>
+        ),
+      },
+      {
+        key: "lines",
+        header: "Lines",
+        value: (row) => row.lines_added + row.lines_deleted,
+        filter: "number",
+        render: (row) => (
+          <span className="whitespace-nowrap font-mono text-xs tabular-nums">
+            +{row.lines_added} / −{row.lines_deleted}
+          </span>
+        ),
+      },
+      {
+        key: "rework",
+        header: "Rework",
+        value: (row) => row.rework_count,
+        filter: "number",
+        render: (row) => (row.rework_count ? <span className="text-amber-300">{row.rework_count}×</span> : "—"),
+      },
+      {
+        key: "flags",
+        header: "Flags",
+        value: (row) => row.flags.map((name) => FLAG_LABELS[name] ?? name).join(", "),
+        filter: "select",
+        filterValues: (row) => row.flags.map((name) => FLAG_LABELS[name] ?? name),
+        render: (row) => (
+          <div className="flex flex-wrap gap-1">
+            {row.flags.map((name) => (
+              <span className="rounded border border-amber-500/30 px-1.5 py-0.5 text-[11px] text-amber-200" key={name}>
+                {FLAG_LABELS[name] ?? name}
+              </span>
+            ))}
+          </div>
+        ),
+      },
+    ],
+    [stageColor],
+  );
 
   const people = (options?.people ?? []).filter((p) => !team || p.team === team);
   const summary = data?.summary;
@@ -371,21 +475,6 @@ export default function StoryQualityPage({ dateRange }: { dateRange: DateRange }
               ))}
             </select>
           </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Flag
-            <select className={inputClass} onChange={(e) => setFlag(e.target.value)} value={flag}>
-              <option value="">Any</option>
-              {Object.entries(summary?.flags ?? {}).map(([name, count]) => (
-                <option key={name} value={name}>
-                  {FLAG_LABELS[name] ?? name} ({count})
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Search
-            <input className={inputClass} onChange={(e) => setSearch(e.target.value)} placeholder="Title or ID" value={search} />
-          </label>
         </div>
         {error && <p className="mt-4 rounded-lg bg-red-900/40 px-4 py-2 text-sm text-red-300">{error}</p>}
         {summary && summary.unmapped_states.length > 0 && (
@@ -454,90 +543,23 @@ export default function StoryQualityPage({ dateRange }: { dateRange: DateRange }
             </div>
           </Card>
 
-          <Card className="overflow-hidden p-0">
-            <div className="flex items-center justify-between px-6 pt-5">
-              <h3 className="text-lg font-semibold text-white">Stories ({stories.length})</h3>
+          <Card>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">Stories</h3>
               {loading && <span className="text-xs text-slate-500">Refreshing…</span>}
             </div>
-            {stories.length === 0 ? (
-              <p className="px-6 py-6 text-sm text-slate-400">
-                No stories match. Stories need their state history: run “Sync Azure DevOps” on the DevOps Integration tab, or widen the date range.
-              </p>
-            ) : (
-              <div className="mt-3 max-h-[42rem] overflow-auto">
-                <table className="w-full min-w-[72rem] text-left text-sm">
-                  <thead className="sticky top-0 z-10 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
-                    <tr>
-                      <th className="px-4 py-2 font-medium">Story</th>
-                      <th className="px-4 py-2 font-medium">Outcome</th>
-                      <th className="w-[22rem] px-4 py-2 font-medium">Timeline</th>
-                      <th className="px-4 py-2 font-medium">Lead</th>
-                      <th className="px-4 py-2 font-medium">PRs</th>
-                      <th className="px-4 py-2 font-medium">Lines</th>
-                      <th className="px-4 py-2 font-medium">Rework</th>
-                      <th className="px-4 py-2 font-medium">Flags</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800 text-slate-300">
-                    {stories.map((row) => (
-                      <Fragment key={row.id}>
-                        <tr
-                          className="cursor-pointer hover:bg-slate-800/40"
-                          onClick={() => setExpanded(expanded === row.id ? null : row.id)}
-                        >
-                          <td className="min-w-[18rem] px-4 py-3">
-                            <span className="font-mono text-xs text-slate-500">#{row.id}</span>{" "}
-                            <span className="text-slate-100">{row.title}</span>
-                            <span className="mt-0.5 block text-xs text-slate-500">
-                              {row.release_version ? `Release ${row.release_version} · ` : ""}
-                              {row.story_points != null ? `${row.story_points} pts · ` : ""}
-                              {row.state}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-xs ${OUTCOME_STYLES[row.outcome]}`}>
-                              {OUTCOME_LABELS[row.outcome]}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
-                            <TimelineBar row={row} stageColor={stageColor} />
-                          </td>
-                          <td className="whitespace-nowrap px-4 py-3 font-mono text-xs tabular-nums">
-                            {row.outcome === "in_progress" ? `${days(row.age_hours)} old` : days(row.lead_time_hours)}
-                          </td>
-                          <td className="whitespace-nowrap px-4 py-3 text-xs">
-                            {row.prs_merged} merged
-                            {row.prs_open ? <span className="text-amber-300"> · {row.prs_open} open</span> : null}
-                          </td>
-                          <td className="whitespace-nowrap px-4 py-3 font-mono text-xs tabular-nums">
-                            +{row.lines_added} / −{row.lines_deleted}
-                          </td>
-                          <td className="whitespace-nowrap px-4 py-3 text-xs">
-                            {row.rework_count ? <span className="text-amber-300">{row.rework_count}×</span> : "—"}
-                          </td>
-                          <td className="px-4 py-3">
-                            <div className="flex flex-wrap gap-1">
-                              {row.flags.map((name) => (
-                                <span className="rounded border border-amber-500/30 px-1.5 py-0.5 text-[11px] text-amber-200" key={name} title={FLAG_LABELS[name]}>
-                                  {FLAG_LABELS[name] ?? name}
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
-                        {expanded === row.id && (
-                          <tr className="bg-slate-950/60">
-                            <td className="px-4 py-4" colSpan={8}>
-                              <StoryDetail row={row} stageColor={stageColor} />
-                            </td>
-                          </tr>
-                        )}
-                      </Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            <p className="mt-1 text-xs text-slate-500">Click a column to sort; use the boxes under the headers to filter. Click a story for its history and PRs.</p>
+            <div className="mt-3">
+              <DataGrid
+                columns={columns}
+                emptyMessage="No stories match. Stories need their state history: run “Sync Azure DevOps” on the DevOps Integration tab, or widen the date range."
+                label="Stories"
+                minWidth="84rem"
+                renderExpanded={(row) => <StoryDetail row={row} stageColor={stageColor} />}
+                rowKey={(row) => row.id}
+                rows={stories}
+              />
+            </div>
           </Card>
         </>
       ) : null}

@@ -1,7 +1,7 @@
 import logging
 import re
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, create_engine, inspect, text
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -108,6 +108,15 @@ def ensure_database_schema():
         "head_branch": _compile_column_definition(String(255)),
         "github_id": _compile_column_definition(BigInteger()),
         "work_item_refs": _compile_column_definition(String(512)),
+        "first_reviewed_at": _compile_column_definition(DateTime()),
+        "approved_at": _compile_column_definition(DateTime()),
+    }
+    run_columns = {column["name"] for column in inspector.get_columns("azure_pipeline_runs")}
+    run_alterations = {
+        "build_work_item_ids": _compile_column_definition(String(2048)),
+        "change_shas": _compile_column_definition(Text()),
+        "change_work_item_refs": _compile_column_definition(String(2048)),
+        "details_fetched_at": _compile_column_definition(DateTime()),
     }
     work_item_columns = {column["name"] for column in inspector.get_columns("azure_work_items")}
     work_item_alterations = {
@@ -123,6 +132,7 @@ def ensure_database_schema():
         _apply_column_alterations(connection, "pull_requests", pull_request_columns, pull_request_alterations)
         _apply_column_alterations(connection, "commits", commit_columns, commit_alterations)
         _apply_column_alterations(connection, "azure_work_items", work_item_columns, work_item_alterations)
+        _apply_column_alterations(connection, "azure_pipeline_runs", run_columns, run_alterations)
         _apply_column_alterations(
             connection,
             "pull_request_comments",

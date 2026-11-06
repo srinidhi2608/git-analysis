@@ -45,6 +45,8 @@ class DevOpsSyncStats:
     # Work items whose state history was downloaded / already up to date.
     histories_fetched: int = 0
     histories_unchanged: int = 0
+    # Pipeline runs whose associated work items and commits were downloaded.
+    run_details_fetched: int = 0
     # Azure DevOps identities whose work items were skipped (not linked to a team member).
     skipped_identities: list[dict] = field(default_factory=list)
     azure_requests: int = 0
@@ -70,6 +72,8 @@ WORK_ITEM_FIELDS = (
     "url",
     "parent_id",
 )
+# Filled from the Builds API "workitems" / "changes" of a run (not part of the run listing).
+RUN_DETAIL_FIELDS = ("build_work_item_ids", "change_shas", "change_work_item_refs")
 HISTORY_FIELDS = ("rev", "changed_by", "changed_by_email", "from_state", "state", "assigned_to", "assigned_to_email")
 RUN_DATE_FIELDS = ("queue_time", "start_time", "finish_time")
 RUN_FIELDS = (
@@ -151,6 +155,11 @@ def upsert_pipeline_run(db: Session, data: dict) -> AzurePipelineRun:
     return run
 
 
+def _join_ids(ids) -> str | None:
+    text = ",".join(str(item) for item in sorted(set(ids)))
+    return text[:2048] or None
+
+
 def _belongs_to_team(data: dict, team_config: TeamConfig) -> bool:
     if not team_config.enabled:
         return True
@@ -208,8 +217,16 @@ def run_devops_ingestion(
             stats.histories_fetched += 1
         db.flush()
         for data in client.fetch_pipeline_runs(project, since, until):
-            upsert_pipeline_run(db, data)
+            run = upsert_pipeline_run(db, data)
             stats.pipeline_runs += 1
+            # A completed run never changes: download its work items and commits once.
+            if config.run_details and run.details_fetched_at is None:
+                details = client.fetch_run_details(project, run.build_id)
+                run.build_work_item_ids = _join_ids(details["work_item_ids"])
+                run.change_shas = ",".join(details["commit_shas"]) or None
+                run.change_work_item_refs = _join_ids(details["work_item_refs"])
+                run.details_fetched_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                stats.run_details_fetched += 1
         db.commit()
 
     stats.azure_requests = client.request_count

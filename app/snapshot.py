@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.devops_ingest import (
     HISTORY_FIELDS,
     RUN_DATE_FIELDS,
+    RUN_DETAIL_FIELDS,
     RUN_FIELDS,
     WORK_ITEM_DATE_FIELDS,
     WORK_ITEM_FIELDS,
@@ -80,6 +81,8 @@ PULL_REQUEST_FIELDS = (
     "head_branch",
     "github_id",
     "work_item_refs",
+    "first_reviewed_at",
+    "approved_at",
 )
 COMMENT_FIELDS = ("comment_type", "author_login", "body", "path", "review_state", "created_at")
 DATETIME_FIELDS = {
@@ -92,6 +95,9 @@ DATETIME_FIELDS = {
     "closed_at",
     "changed_at",
     "history_changed_date",
+    "first_reviewed_at",
+    "approved_at",
+    "details_fetched_at",
     *WORK_ITEM_DATE_FIELDS,
     *RUN_DATE_FIELDS,
 }
@@ -205,6 +211,8 @@ def export_data(db: Session) -> dict[str, Any]:
                 "build_id": run.build_id,
                 **{field: getattr(run, field) for field in RUN_FIELDS},
                 **{field: _dump_value(getattr(run, field)) for field in RUN_DATE_FIELDS},
+                **{field: getattr(run, field) for field in RUN_DETAIL_FIELDS},
+                "details_fetched_at": _dump_value(run.details_fetched_at),
             }
             for run in db.query(AzurePipelineRun).all()
         ],
@@ -305,7 +313,11 @@ def import_data(db: Session, data: dict[str, Any]) -> dict[str, int]:
             )
             item.history_changed_date = _load_value("history_changed_date", row.get("history_changed_date"))
     for row in data.get("azure_pipeline_runs", []):
-        upsert_pipeline_run(db, {**row, **{field: _load_value(field, row.get(field)) for field in RUN_DATE_FIELDS}})
+        run = upsert_pipeline_run(db, {**row, **{field: _load_value(field, row.get(field)) for field in RUN_DATE_FIELDS}})
+        if "details_fetched_at" in row:
+            for field in RUN_DETAIL_FIELDS:
+                setattr(run, field, row.get(field))
+            run.details_fetched_at = _load_value("details_fetched_at", row.get("details_fetched_at"))
 
     db.commit()
     return {table: len(data.get(table, [])) for table in TABLES}
