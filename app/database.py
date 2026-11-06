@@ -1,8 +1,9 @@
 import logging
 import re
+import time
 
 from sqlalchemy import DateTime, Integer, String, create_engine, inspect, text
-from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
@@ -13,6 +14,49 @@ engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+
+class DatabaseUnavailableError(RuntimeError):
+    """The database could not be reached within the startup timeout."""
+
+
+def wait_for_database(timeout_seconds: float | None = None, interval_seconds: float = 2.0) -> None:
+    """Block until the database accepts connections, or raise ``DatabaseUnavailableError``.
+
+    In Docker the app can start while the ``db`` container is still starting,
+    restarting or stopped; its host name only resolves while it runs. Retrying
+    with a clear log message beats crashing on the first attempt.
+    """
+    timeout = settings.db_connect_timeout_seconds if timeout_seconds is None else timeout_seconds
+    target = f"{engine.url.host or 'localhost'}:{engine.url.port or 5432}/{engine.url.database or ''}"
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            if attempt > 1:
+                logger.info("Database %s is reachable (attempt %d).", target, attempt)
+            return
+        except OperationalError as exc:
+            reason = str(exc.orig if getattr(exc, "orig", None) else exc).strip().splitlines()[0]
+            if time.monotonic() + interval_seconds > deadline:
+                raise DatabaseUnavailableError(
+                    f"Could not connect to the database at {target} after {attempt} attempts "
+                    f"({timeout:.0f}s): {reason}. "
+                    "With Docker Compose, check that the db service is running and healthy "
+                    "(`docker compose ps`, `docker compose logs db`) and start both together with "
+                    "`docker compose up -d`. Outside Docker, check DATABASE_URL in .env."
+                ) from exc
+            logger.warning(
+                "Database %s not reachable yet (%s); retrying in %.0fs (attempt %d).",
+                target,
+                reason,
+                interval_seconds,
+                attempt,
+            )
+            time.sleep(interval_seconds)
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 COLUMN_DEFINITION_PATTERN = re.compile(r"^[A-Z0-9(), ]+$")

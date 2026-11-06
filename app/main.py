@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.database import SessionLocal, ensure_database_schema, get_db
+from app.database import SessionLocal, ensure_database_schema, get_db, wait_for_database
 from app.config import settings
 from app.config_loader import load_active_repositories
 from app.developer_analytics import get_developer_review_analytics
@@ -366,6 +366,7 @@ def _autoload_snapshot(db: Session) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    wait_for_database()
     ensure_database_schema()
     global active_repos
     active_repos = load_active_repositories()
