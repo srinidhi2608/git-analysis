@@ -8,6 +8,7 @@ activity (were updated) within the lookback window.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -50,9 +51,13 @@ query($owner: String!, $repo: String!, $after: String) {
 
 PR_DETAIL_SELECTION = """
 number
+fullDatabaseId
 title
+body
+state
 updatedAt
 baseRefName
+headRefName
 mergeCommit { oid }
 createdAt
 mergedAt
@@ -105,6 +110,15 @@ reviewDecision
 """
 
 DETAIL_BATCH_SIZE = 10
+
+
+AB_REFERENCE = re.compile(r"AB#(\d+)", re.IGNORECASE)
+
+
+def work_item_refs(*texts: str | None) -> str | None:
+    """Comma-separated Azure Boards ids mentioned as ``AB#<id>`` in ``texts`` (``None`` if none)."""
+    ids = sorted({int(match) for text in texts if text for match in AB_REFERENCE.findall(text)})
+    return ",".join(str(item) for item in ids)[:512] or None
 
 
 def _aware(value: datetime) -> datetime:
@@ -336,6 +350,14 @@ query({", ".join(variable_definitions)}) {{
         )
 
         approvals_count = sum(1 for review in review_nodes if review.get("state") == "APPROVED")
+        reviews_by_others = [
+            review for review in review_nodes
+            if (review.get("author") or {}).get("login") != author_login and review.get("submittedAt")
+        ]
+        first_reviewed_at = min((review["submittedAt"] for review in reviews_by_others), default=None)
+        approved_at = min(
+            (review["submittedAt"] for review in reviews_by_others if review.get("state") == "APPROVED"), default=None
+        )
         requested_changes_count = sum(
             1 for review in review_nodes if review.get("state") == "CHANGES_REQUESTED"
         )
@@ -442,6 +464,14 @@ query({", ".join(variable_definitions)}) {{
             "updated_at": node.get("updatedAt"),
             "merge_commit_sha": (node.get("mergeCommit") or {}).get("oid"),
             "base_branch": node.get("baseRefName"),
+            "head_branch": node.get("headRefName"),
+            "state": node.get("state"),
+            "closed_at": node.get("closedAt"),
+            "github_id": int(node["fullDatabaseId"]) if node.get("fullDatabaseId") else None,
+            # Only the AB#<id> work item references are kept from the description.
+            "work_item_refs": work_item_refs(node.get("title"), node.get("body")),
+            "first_reviewed_at": first_reviewed_at,
+            "approved_at": approved_at,
             "review_comments_count": review_comment_count,
             "commit_count": node["commits"]["totalCount"],
             "changed_files": node.get("changedFiles") or 0,

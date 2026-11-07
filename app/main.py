@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.database import SessionLocal, ensure_database_schema, get_db
+from app.database import SessionLocal, ensure_database_schema, get_db, wait_for_database
 from app.config import settings
 from app.config_loader import load_active_repositories
 from app.developer_analytics import get_developer_review_analytics
@@ -32,6 +32,16 @@ from app.models import AzurePipelineRun, AzureWorkItem, Developer, PullRequest
 from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_snapshot
 from app.teams import load_team_config
 from app.time_window import TimeWindow
+from app.lifecycle_config import load_lifecycle_config
+from app.pr_timeline import build_pr_rows, pr_timeline_csv, summarize_prs
+from app.work_item_links import LinkIndex
+from app.story_lifecycle import (
+    build_story_lifecycles,
+    lifecycle_csv,
+    pull_requests_csv,
+    summarize_lifecycles,
+    transitions_csv,
+)
 from app.devops_config import load_devops_config
 from app.devops_ingest import run_devops_ingestion
 from app.devops_metrics import (
@@ -366,6 +376,7 @@ def _autoload_snapshot(db: Session) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    wait_for_database()
     ensure_database_schema()
     global active_repos
     active_repos = load_active_repositories()
@@ -964,6 +975,101 @@ def devops_report(
         report,
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="devops-report-{stamp}.md"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Story lifecycle (Story Quality page and CSV reports)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/stories/lifecycle")
+def story_lifecycle(filters: StoryFilters = Depends(story_filters), db: Session = Depends(get_db)):
+    """User stories with their stage timeline, linked PRs, people, rework and quality flags.
+
+    ``status=completed`` (default): stories released or closed in the date range;
+    ``status=all``: also stories still in progress during the range.
+    """
+    config = load_lifecycle_config()
+    rows = build_story_lifecycles(db, filters, load_team_config(), config)
+    return {
+        "filters": filters.describe(),
+        "config": config.describe(),
+        "summary": summarize_lifecycles(rows, config),
+        "stories": rows,
+    }
+
+
+def _pull_request_rows(db: Session, window: TimeWindow, team: str | None, branches: list[str] | None):
+    return build_pr_rows(
+        db,
+        window,
+        load_team_config(),
+        LinkIndex(db, load_lifecycle_config()),
+        devops_config=load_devops_config(),
+        teams=_resolve_teams(team),
+        branches=branches,
+    )
+
+
+@app.get("/api/pull-requests")
+def pull_request_timeline(
+    team: str | None = None,
+    window: TimeWindow = Depends(time_window),
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
+    """PRs created or merged in the range, with their phase timeline, linked stories and flags."""
+    rows, deployments_configured = _pull_request_rows(db, window, team, branches)
+    return {
+        "window": window.describe(),
+        "summary": summarize_prs(rows, deployments_configured),
+        "pull_requests": rows,
+    }
+
+
+@app.get("/api/reports/pull-requests.csv")
+def pull_request_report(
+    team: str | None = None,
+    window: TimeWindow = Depends(time_window),
+    branches: list[str] | None = Depends(target_branches),
+    db: Session = Depends(get_db),
+):
+    """CSV of the PR timeline grid (same filters)."""
+    rows, _ = _pull_request_rows(db, window, team, branches)
+    stamp = f"{window.start:%Y%m%d}-{window.end:%Y%m%d}"
+    return Response(
+        pr_timeline_csv(rows),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="pull-requests-{stamp}.csv"'},
+    )
+
+
+STORY_REPORTS = {
+    "story-lifecycle": "one row per story",
+    "story-transitions": "one row per state change",
+    "story-pull-requests": "one row per story and linked pull request",
+}
+
+
+@app.get("/api/reports/{report}.csv")
+def story_report_csv(report: str, filters: StoryFilters = Depends(story_filters), db: Session = Depends(get_db)):
+    """CSV reports: ``story-lifecycle``, ``story-transitions`` or ``story-pull-requests`` (same filters as the page)."""
+    if report not in STORY_REPORTS:
+        raise HTTPException(status_code=404, detail=f"Unknown report; use one of {', '.join(STORY_REPORTS)}")
+    config = load_lifecycle_config()
+    rows = build_story_lifecycles(db, filters, load_team_config(), config)
+    if report == "story-lifecycle":
+        body = lifecycle_csv(rows, config)
+    elif report == "story-transitions":
+        body = transitions_csv(rows, config)
+    else:
+        body = pull_requests_csv(rows)
+    stamp = f"{filters.date_from:%Y%m%d}-{filters.date_to:%Y%m%d}"
+    return Response(
+        body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{report}-{stamp}.csv"'},
     )
 
 

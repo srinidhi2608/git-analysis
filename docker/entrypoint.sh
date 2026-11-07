@@ -3,6 +3,7 @@
 # Container entrypoint — Git Analysis
 #
 # Runs as root only to prepare the container, then drops to `appuser`:
+#   0. Makes sure `appuser` can resolve host names (the database "db" above all).
 #   1. Makes the bind-mounted snapshot directory writable.
 #   2. Trusts extra CA certificates from $CA_CERTS_DIR (corporate proxy,
 #      GitHub Enterprise, Azure DevOps Server, internal LLM endpoints, ...).
@@ -18,6 +19,7 @@ set -eu
 
 log() { echo "entrypoint: $*" >&2; }
 fail() { log "ERROR: $*"; exit 1; }
+as_app() { setpriv --reuid="$APP_USER" --regid="$APP_USER" --init-groups "$@"; }
 is_true() { case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
 
 APP_USER="${APP_USER:-appuser}"
@@ -40,6 +42,58 @@ if [ "$AS_ROOT" = "1" ]; then
     chown -R "$APP_USER:$APP_USER" /app/snapshots || log "warning: could not change ownership of /app/snapshots"
     chown "$APP_USER:$APP_USER" "$RUN_DIR"
     chmod 0750 "$RUN_DIR"
+fi
+
+# --- 0. Name resolution for the app user --------------------------------------
+# Some Docker versions (seen with Docker Desktop) create /etc/resolv.conf or
+# /etc/hosts readable by root only. The app runs as $APP_USER; without them
+# glibc falls back to a DNS server on 127.0.0.1 that does not exist, and the
+# database connection fails with: could not translate host name "db" to
+# address: Temporary failure in name resolution.
+if [ "$AS_ROOT" = "1" ]; then
+    for file in /etc/resolv.conf /etc/hosts /etc/nsswitch.conf; do
+        [ -e "$file" ] || continue
+        if ! as_app test -r "$file"; then
+            if chmod a+r "$file" 2>/dev/null; then
+                log "made $file readable for $APP_USER (it was readable by root only)"
+            else
+                log "warning: $file is not readable by $APP_USER and could not be changed"
+            fi
+        fi
+    done
+
+    # If root can resolve the database host but the app user still cannot,
+    # pin its address in /etc/hosts so the app does not depend on DNS.
+    db_host="$(python -c 'import os, sys
+from urllib.parse import urlsplit
+try:
+    print(urlsplit(os.environ.get("DATABASE_URL", "")).hostname or "")
+except ValueError:
+    print("")' 2>/dev/null || true)"
+    resolve='import socket, sys; print(socket.gethostbyname(sys.argv[1]))'
+    case "$db_host" in
+        ""|localhost|127.*) ;;
+        *)
+            if ! as_app python -c "$resolve" "$db_host" >/dev/null 2>&1; then
+                if db_ip="$(python -c "$resolve" "$db_host" 2>/dev/null)"; then
+                    if printf '%s\t%s\n' "$db_ip" "$db_host" >> /etc/hosts 2>/dev/null; then
+                        log "$APP_USER could not resolve database host '$db_host'; pinned it to $db_ip in /etc/hosts"
+                    else
+                        log "warning: $APP_USER cannot resolve database host '$db_host' and /etc/hosts is not writable"
+                    fi
+                else
+                    log "database host '$db_host' does not resolve; the app will keep retrying. Diagnosis:"
+                    log "  DNS servers in /etc/resolv.conf: $(grep -s '^nameserver' /etc/resolv.conf | awk '{print $2}' | tr '\n' ' ')"
+                    if python -c "$resolve" github.com >/dev/null 2>&1; then
+                        log "  DNS works (github.com resolves) but '$db_host' is unknown: the db container is not running or not on this network (docker compose ps -a; docker compose logs db)"
+                    else
+                        log "  DNS does not work in this container at all (github.com does not resolve either): Docker's DNS is blocked, often by a VPN or security software."
+                        log "  docker-compose.yml maps '$db_host' in /etc/hosts (extra_hosts) to avoid DNS; make sure you run this repository's docker-compose.yml"
+                    fi
+                fi
+            fi
+            ;;
+    esac
 fi
 
 # --- 1. Extra trusted CA certificates ----------------------------------------

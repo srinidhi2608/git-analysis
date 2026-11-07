@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.azure_devops import AzureDevOpsClient
 from app.devops_config import DevOpsConfig, load_devops_config
-from app.models import AzurePipelineRun, AzureWorkItem, AzureWorkItemTag
+from app.models import (
+    AzurePipelineRun,
+    AzureWorkItem,
+    AzureWorkItemRelation,
+    AzureWorkItemStateChange,
+    AzureWorkItemTag,
+)
 from app.teams import SkippedAuthors, TeamConfig, load_team_config
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,11 @@ class DevOpsSyncStats:
     work_items: int = 0
     pipeline_runs: int = 0
     skipped_work_items: int = 0
+    # Work items whose state history was downloaded / already up to date.
+    histories_fetched: int = 0
+    histories_unchanged: int = 0
+    # Pipeline runs whose associated work items and commits were downloaded.
+    run_details_fetched: int = 0
     # Azure DevOps identities whose work items were skipped (not linked to a team member).
     skipped_identities: list[dict] = field(default_factory=list)
     azure_requests: int = 0
@@ -59,7 +70,11 @@ WORK_ITEM_FIELDS = (
     "iteration_path",
     "area_path",
     "url",
+    "parent_id",
 )
+# Filled from the Builds API "workitems" / "changes" of a run (not part of the run listing).
+RUN_DETAIL_FIELDS = ("build_work_item_ids", "change_shas", "change_work_item_refs")
+HISTORY_FIELDS = ("rev", "changed_by", "changed_by_email", "from_state", "state", "assigned_to", "assigned_to_email")
 RUN_DATE_FIELDS = ("queue_time", "start_time", "finish_time")
 RUN_FIELDS = (
     "build_number",
@@ -100,6 +115,32 @@ def upsert_work_item(db: Session, data: dict) -> AzureWorkItem:
     return item
 
 
+def replace_history(db: Session, item: AzureWorkItem, history: list[dict], relations: list[dict]) -> None:
+    """Replace the stored state history and links of ``item``."""
+    item.history.clear()
+    item.relations.clear()
+    db.flush()
+    seen_revs: set[int] = set()
+    for entry in history:
+        changed_at = entry.get("changed_at")
+        changed_at = parse_azure_datetime(changed_at) if isinstance(changed_at, str) else changed_at
+        if changed_at is None or entry["rev"] in seen_revs:
+            continue
+        seen_revs.add(entry["rev"])
+        item.history.append(
+            AzureWorkItemStateChange(changed_at=changed_at, **{name: entry.get(name) for name in HISTORY_FIELDS})
+        )
+    for link in relations:
+        item.relations.append(
+            AzureWorkItemRelation(
+                rel=link["rel"][:255],
+                name=(link.get("name") or None) and link["name"][:255],
+                url=link["url"][:1024],
+                target_id=link.get("target_id"),
+            )
+        )
+
+
 def upsert_pipeline_run(db: Session, data: dict) -> AzurePipelineRun:
     run = db.query(AzurePipelineRun).filter_by(project=data["project"], build_id=data["build_id"]).one_or_none()
     if run is None:
@@ -112,6 +153,11 @@ def upsert_pipeline_run(db: Session, data: dict) -> AzurePipelineRun:
         value = data.get(name)
         setattr(run, name, parse_azure_datetime(value) if isinstance(value, str) else value)
     return run
+
+
+def _join_ids(ids) -> str | None:
+    text = ",".join(str(item) for item in sorted(set(ids)))
+    return text[:2048] or None
 
 
 def _belongs_to_team(data: dict, team_config: TeamConfig) -> bool:
@@ -159,12 +205,28 @@ def run_devops_ingestion(
                 skipped.record(identity or data.get("created_by_email") or data.get("created_by"), "work_item", project)
                 stats.skipped_work_items += 1
                 continue
-            upsert_work_item(db, data)
+            item = upsert_work_item(db, data)
             stats.work_items += 1
+            # State history drives the story lifecycle; download it only when the item changed.
+            if item.history_changed_date is not None and item.history_changed_date == item.changed_date:
+                stats.histories_unchanged += 1
+                continue
+            details = client.fetch_work_item_updates(project, item.id)
+            replace_history(db, item, details["history"], details["relations"])
+            item.history_changed_date = item.changed_date
+            stats.histories_fetched += 1
         db.flush()
         for data in client.fetch_pipeline_runs(project, since, until):
-            upsert_pipeline_run(db, data)
+            run = upsert_pipeline_run(db, data)
             stats.pipeline_runs += 1
+            # A completed run never changes: download its work items and commits once.
+            if config.run_details and run.details_fetched_at is None:
+                details = client.fetch_run_details(project, run.build_id)
+                run.build_work_item_ids = _join_ids(details["work_item_ids"])
+                run.change_shas = ",".join(details["commit_shas"]) or None
+                run.change_work_item_refs = _join_ids(details["work_item_refs"])
+                run.details_fetched_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                stats.run_details_fetched += 1
         db.commit()
 
     stats.azure_requests = client.request_count

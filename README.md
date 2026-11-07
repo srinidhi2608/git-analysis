@@ -7,6 +7,9 @@ It pulls PRs, reviews, review comments and commits for the repositories you choo
 - **Team overview**: for all teams or one selected team, PR cycle time, merged PRs per week, and **DORA-inspired delivery metrics** (merge frequency, lead time, time to first review, review coverage, approval rate, change-failure proxy, recovery time) with weekly trends.
 - **Individual performance**: for each developer, PR size, review-comment density, requested-changes rate, rework after feedback, follow-up speed, recurring review themes, top reviewers and the languages they work in.
 - **DevOps Integration (optional)**: connects **Azure Boards** (user stories, bugs, tasks) and **Azure Pipelines** (deployments) to the GitHub data. You can filter stories by tag, date range, team or person, export reports, see each developer's and tester's delivery, and get **DORA metrics** (deployment frequency, lead time for changes, change failure rate, failed deployment recovery time) for the team or a single person. The definitions follow [Apache DevLake](https://devlake.apache.org/).
+- **Pull request timeline**: on Team Overview, every PR with its phases (coding, waiting for review, in review, waiting to merge, waiting to deploy), the stories it belongs to, and flags. It finds **PRs with no story**, unreviewed merges and PRs never deployed. Downloadable as CSV. See [docs/pull-request-timeline.md](docs/pull-request-timeline.md).
+- **Sortable, filterable grids**: click any column header to sort; filter every column (text, value lists, number ranges such as `>5` or `1-10`).
+- **Story Quality (optional, with Azure DevOps)**: every user story's lifecycle from creation to release: time in each stage (Dev, QA, QAA, INT), linked pull requests, developers and testers, rework, integrity flags, and how much of the story's time went into code. Downloadable as CSV. See [docs/story-lifecycle.md](docs/story-lifecycle.md).
 - **AI summary (optional)**: written strengths, improvement areas, design-pattern and DRY/WET notes. These come from an online LLM (OpenAI or Gemini) or a local [Ollama](https://ollama.com) model, based on the actual review comments. A rule-based fallback always works, so no AI setup is required.
 
 > These metrics are signals to start a conversation, not a performance verdict. The AI and heuristic scores come from review comments and PR metadata only. They don't look at the code itself.
@@ -165,13 +168,14 @@ All settings are environment variables. The backend reads them from `.env` in th
 | `DATABASE_URL` | yes (non-Docker) | – | SQLAlchemy URL, e.g. `postgresql+psycopg2://git_user:changeme@localhost:5432/git_analysis`. Docker Compose sets this automatically for the app container |
 | `POSTGRES_PASSWORD` | no | `changeme` | Password of the Compose PostgreSQL container |
 | `APP_PORT` / `POSTGRES_PORT` | no | `8000` / `5432` | Host ports published by Docker Compose |
+| `DOCKER_SUBNET` / `DB_IP` / `OLLAMA_IP` | no | `172.31.253.0/24` / `.10` / `.11` | Private network of the containers. The app reaches `db` and `ollama` at these fixed addresses through `/etc/hosts`, so it doesn't depend on Docker's DNS. Change them if the range clashes with your network or VPN |
 | `ONLINE_AI_ENABLED` | no | `false` | Enable the online LLM (tier 1) |
 | `ONLINE_AI_API_KEY` | no | – | API key for OpenAI or Google Gemini |
 | `ONLINE_AI_MODEL` | no | `gemini-1.5-pro` | Model name. `gemini-*` uses Google's OpenAI-compatible endpoint, anything else uses OpenAI |
 | `OLLAMA_BASE_URL` | no | `http://localhost:11434` (local) / `http://host.docker.internal:11434` (Compose) | Ollama server (tier 2) |
 | `OLLAMA_MODEL` | no | `qwen2.5-coder:14b` | Ollama model name |
 | `DEVELOPER_ANALYTICS_AI_URL` / `_TOKEN` / `_MODEL` | no | – | Optional OpenAI-compatible chat-completions endpoint for the developer *overview narrative*. If unset, a rule-based narrative is used |
-| `AZURE_DEVOPS_PAT` | no | – | Azure DevOps personal access token (Work Items: Read, Build: Read) for the DevOps Integration page |
+| `AZURE_DEVOPS_PAT` | no | – | Azure DevOps personal access token (Work Items: Read, Build: Read) for the DevOps Integration and Story Quality pages |
 | `SNAPSHOT_DIR` | no | `snapshots` | Where snapshots are written (`./snapshots` on the host with Docker Compose) |
 | `SNAPSHOT_AUTOLOAD` | no | `true` | Load the newest snapshot at startup when the database has no pull requests |
 | `SNAPSHOT_AFTER_SYNC` | no | `true` | Save a snapshot automatically after every successful sync |
@@ -494,6 +498,9 @@ azure_devops:
   incidents:
     work_item_types: ["Bug"]
     tags: ["Incident"]
+  # Download each new pipeline run's associated work items and commits (2 requests per run,
+  # once) to show the stories behind it. Default true.
+  run_details: true
 ```
 
 **Step 4: Link people across GitHub and Azure DevOps**
@@ -586,6 +593,37 @@ The underlying rules:
 
 ---
 
+### 7.5 Story Quality: the story lifecycle report
+
+The **Story Quality** tab gives one row per user story. Each row has:
+
+- **When it moved**: when it entered each stage of your board (New → Active → QA Dev → QAA → INT → Released / Closed), and how long it spent in each.
+- **Its code**: the GitHub pull requests behind it (merged, open or abandoned) and lines changed.
+- **Its people**: who developed and who tested it.
+- **Rework and integrity checks**: bounces back from QA, reopened stories, skipped stages, stories closed without code, open PRs on finished stories, releases without a `Release x.y.z` tag.
+- **Time on code vs time on the story**: how much of the story's time the code itself took.
+
+All of it downloads as CSV: stories, state changes, and story–PR links.
+
+**To set it up:**
+
+1. Map your board states to stages in `config.yaml` under `lifecycle`. The defaults already match a New / Active / QA Dev In Progress / QA Dev Complete / QAA In Progress / QAA Complete / INT / Released / Closed board.
+2. Run **Sync Azure DevOps**. It now also downloads each changed work item's state history.
+3. Run one **Sync from GitHub** with **Full refresh on sync**.
+
+**Read [docs/story-lifecycle.md](docs/story-lifecycle.md)** for the full guide: configuration, how PRs are linked to stories, every definition and flag, the CSV columns, the API, and troubleshooting.
+
+### 7.6 Stories behind PRs and pipeline runs
+
+GitHub pull requests and Azure Pipelines runs are linked to Azure Boards work items, and through them to stories:
+
+- **A PR** is linked by any of: an Azure Boards GitHub link; `AB#<id>` in its title, description or commits; or the id in its branch name. A child Task or Bug links it to the parent story too.
+- **A pipeline run** is linked by any of: the work items Azure DevOps associates with the run; `AB#<id>` in the commits it built; or the stories of the PRs whose commits it built. These show in the **Stories** column of the Pipeline runs grid.
+
+The **Pull request timeline** on Team Overview lists every PR with its phases and stories, and finds PRs without one (filter **Stories → No story**).
+
+Full details, including how to sort and filter every grid: [docs/pull-request-timeline.md](docs/pull-request-timeline.md).
+
 ## 8) Production deployment (HTTPS, certificates, hardening)
 
 The Docker image is ready for production as is. Certificates are handled by the container's entrypoint (`docker/entrypoint.sh`), which runs as root only to prepare them, then starts the app as the unprivileged `appuser`.
@@ -669,6 +707,7 @@ To use an external database, set `DATABASE_URL` in an override and remove the `d
 | `CORS_ALLOW_ORIGINS` | `*` | Comma-separated allowed origins (empty = none) |
 | `ENABLE_API_DOCS` | `true` | Serve `/docs`, `/redoc`, `/openapi.json` |
 | `LOG_LEVEL` | `info` | App and uvicorn log level |
+| `DB_CONNECT_TIMEOUT_SECONDS` | `60` | How long startup keeps retrying the database before giving up (e.g. while the `db` container starts) |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies trusted for `X-Forwarded-*` |
 | `PORT` | `8000` | Port inside the container (map it with `APP_PORT`) |
 | `WEB_CONCURRENCY` | `1` | Uvicorn workers. **Keep 1:** the one-sync-at-a-time lock and sync status live in the process. For more capacity, give the container more CPU/memory |
@@ -709,6 +748,10 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/devops/stories` | Filtered work items + summary + efficiency by person |
 | GET | `/api/devops/dora` | DORA metrics for everyone, `?team=` or `?person=`, plus the pipeline runs behind them (`runs`, with `attributed_by`) |
 | GET | `/api/devops/report` | Download `?format=csv` or `?format=markdown` for the filtered work items |
+| GET | `/api/pull-requests` | PR timeline rows (phases, stories, work items, flags) and summary; `date_from`/`date_to` (or `days`), `team`, `branches` ([guide](docs/pull-request-timeline.md#6-api-and-csv)) |
+| GET | `/api/reports/pull-requests.csv` | PR timeline CSV |
+| GET | `/api/stories/lifecycle` | Story lifecycle rows (timeline, PRs, people, rework, flags) and summary; same filters as the DevOps endpoints plus `status=completed\|all` ([guide](docs/story-lifecycle.md#8-api)) |
+| GET | `/api/reports/{story-lifecycle\|story-transitions\|story-pull-requests}.csv` | Story CSV reports |
 | POST | `/api/snapshots/load` | Load the newest snapshot (or `{"name": ...}`), upserting into the database |
 
 Query parameters:
@@ -760,6 +803,10 @@ app/
   devops_config.py      azure_devops settings from config.yaml / .env
   devops_ingest.py      Azure DevOps sync (upsert, team filter)
   devops_metrics.py     Story filters, efficiency, DORA (DevLake definitions), reports
+  lifecycle_config.py   `lifecycle` settings: board states → stages, release tag pattern
+  story_lifecycle.py    Story lifecycle rows, story ↔ PR links, quality flags, CSV reports
+  work_item_links.py    Work item ↔ PR / commit / pipeline run index (stories behind PRs and runs)
+  pr_timeline.py        Pull request timeline rows, phases, flags, CSV
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
@@ -770,7 +817,8 @@ app/
   developer_analytics.py  Per-developer review analytics + narrative
   ai_analyzers.py       Online LLM → Ollama → rule-based analyzer
 frontend/               React + Vite dashboard (src/components: GitAnalyticsDashboard, DevOpsIntegrationPage,
-                        DateTimeRangePicker + dateRange.ts, BranchSelect)
+                        StoryQualityPage, PullRequestTimeline, DataGrid, DateTimeRangePicker + dateRange.ts, BranchSelect)
+docs/                   story-lifecycle.md (Story Quality), pull-request-timeline.md (PR timeline, links, grids)
 scripts/                seed_data.sql (demo data), seed_devops.sql (Azure demo data), clear_data.sql (wipe data)
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse
@@ -812,6 +860,8 @@ npm run build
 | `SSL: CERTIFICATE_VERIFY_FAILED` when syncing | A corporate proxy or self-hosted GitHub/Azure DevOps uses a private CA: put its certificate in `certs/ca/` and restart |
 | Browser shows a certificate warning | The certificate isn't trusted by the browser (self-signed), or its name doesn't match the URL; use a certificate for the host name you open |
 | Selecting a target branch hides older PRs | They were synced before target branches were recorded: run a GitHub sync with **Full refresh on sync** |
+| Most PRs show "No story", or pipeline runs show no stories | Sync Azure DevOps (work items, and each run's work items and commits) and run one GitHub sync with **Full refresh on sync**. See [the PR timeline guide's troubleshooting](docs/pull-request-timeline.md#7-troubleshooting) |
+| Story Quality shows no stories, or warns about unmapped states | Run **Sync Azure DevOps** (it downloads state history), choose **Also in progress**, and map every board state under `lifecycle.stages` in `config.yaml`. See [the guide's troubleshooting](docs/story-lifecycle.md#10-troubleshooting) |
 | DevOps page says "Not configured" | Set `AZURE_DEVOPS_PAT` in `.env` and `azure_devops.organization` / `projects` in `config.yaml`, then restart (section 7.2) |
 | Azure sync fails with "rejected the credentials" | The PAT is expired, belongs to another organization, or lacks the **Work Items: Read** / **Build: Read** scopes |
 | DORA shows "No production deployments" | `deployment_pattern` / `production_pattern` don't match your pipeline names; the page header shows the patterns in use |
@@ -823,6 +873,7 @@ npm run build
 | Sync finishes but nothing appears | Check `docker compose logs app`. *"GitHub rejected the request (401/403)"* means the token is invalid or lacks access to the repository. Also try a wider date range: only PRs updated in that range are imported |
 | App container exits with a `github_token` / `database_url` "Field required" error | `GITHUB_TOKEN` is missing from `.env` (or `DATABASE_URL` when running without Docker) |
 | `password authentication failed` after changing `POSTGRES_PASSWORD` | The password is fixed when the volume is first created. Run `docker compose down -v` (deletes data), then start again |
+| App logs `could not translate host name "db" to address: Temporary failure in name resolution` | `db` is the PostgreSQL container. The app could not turn that name into an address because Docker's DNS doesn't work inside your containers, which is common with Docker Desktop behind a VPN or security software. `docker-compose.yml` now gives `db` a fixed address (`DB_IP`, default `172.31.253.10`) and writes it into the app's `/etc/hosts`, so DNS isn't needed: rebuild and recreate with `docker compose down` then `docker compose up -d --build`. The entrypoint also fixes a `/etc/resolv.conf` readable by root only, and prints a diagnosis (`entrypoint: ... Diagnosis:`) if `db` still can't be found. If it says *DNS does not work in this container at all*, GitHub and Azure syncs need DNS too: check Docker Desktop's network settings or VPN. If `docker compose up` reports `Pool overlaps`, set `DOCKER_SUBNET`, `DB_IP` and `OLLAMA_IP` in `.env`. "Name or service not known" instead means the `db` container isn't running (`docker compose ps -a`, `docker compose logs db`) |
 | `port is already allocated` | Set `APP_PORT` or `POSTGRES_PORT` in `.env` |
 | `Could not create unique index ...` warning on startup | An older version stored duplicate PRs. Run `scripts/clear_data.sql` and sync again |
 | Logs say `LocalOllamaHandler returned no usable analysis` | The model answered without usable values (e.g. all `null`), so the rule-based analysis is used. Partial answers are kept, and missing fields are filled from the rule-based analysis (logged as `... filled from the heuristic analysis`). Small models do this more often; try a larger `OLLAMA_MODEL` or Ollama 0.5+, which supports the JSON schema the app sends |

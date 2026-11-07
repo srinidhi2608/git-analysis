@@ -1,8 +1,9 @@
 import logging
 import re
+import time
 
-from sqlalchemy import DateTime, Integer, String, create_engine, inspect, text
-from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
@@ -13,6 +14,49 @@ engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+
+class DatabaseUnavailableError(RuntimeError):
+    """The database could not be reached within the startup timeout."""
+
+
+def wait_for_database(timeout_seconds: float | None = None, interval_seconds: float = 2.0) -> None:
+    """Block until the database accepts connections, or raise ``DatabaseUnavailableError``.
+
+    In Docker the app can start while the ``db`` container is still starting,
+    restarting or stopped; its host name only resolves while it runs. Retrying
+    with a clear log message beats crashing on the first attempt.
+    """
+    timeout = settings.db_connect_timeout_seconds if timeout_seconds is None else timeout_seconds
+    target = f"{engine.url.host or 'localhost'}:{engine.url.port or 5432}/{engine.url.database or ''}"
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            if attempt > 1:
+                logger.info("Database %s is reachable (attempt %d).", target, attempt)
+            return
+        except OperationalError as exc:
+            reason = str(exc.orig if getattr(exc, "orig", None) else exc).strip().splitlines()[0]
+            if time.monotonic() + interval_seconds > deadline:
+                raise DatabaseUnavailableError(
+                    f"Could not connect to the database at {target} after {attempt} attempts "
+                    f"({timeout:.0f}s): {reason}. "
+                    "With Docker Compose, check that the db service is running and healthy "
+                    "(`docker compose ps`, `docker compose logs db`) and start both together with "
+                    "`docker compose up -d`. Outside Docker, check DATABASE_URL in .env."
+                ) from exc
+            logger.warning(
+                "Database %s not reachable yet (%s); retrying in %.0fs (attempt %d).",
+                target,
+                reason,
+                interval_seconds,
+                attempt,
+            )
+            time.sleep(interval_seconds)
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 COLUMN_DEFINITION_PATTERN = re.compile(r"^[A-Z0-9(), ]+$")
@@ -103,6 +147,25 @@ def ensure_database_schema():
         "github_updated_at": _compile_column_definition(DateTime()),
         "merge_commit_sha": _compile_column_definition(String(64)),
         "base_branch": _compile_column_definition(String(255)),
+        "state": _compile_column_definition(String(16)),
+        "closed_at": _compile_column_definition(DateTime()),
+        "head_branch": _compile_column_definition(String(255)),
+        "github_id": _compile_column_definition(BigInteger()),
+        "work_item_refs": _compile_column_definition(String(512)),
+        "first_reviewed_at": _compile_column_definition(DateTime()),
+        "approved_at": _compile_column_definition(DateTime()),
+    }
+    run_columns = {column["name"] for column in inspector.get_columns("azure_pipeline_runs")}
+    run_alterations = {
+        "build_work_item_ids": _compile_column_definition(String(2048)),
+        "change_shas": _compile_column_definition(Text()),
+        "change_work_item_refs": _compile_column_definition(String(2048)),
+        "details_fetched_at": _compile_column_definition(DateTime()),
+    }
+    work_item_columns = {column["name"] for column in inspector.get_columns("azure_work_items")}
+    work_item_alterations = {
+        "parent_id": _compile_column_definition(Integer()),
+        "history_changed_date": _compile_column_definition(DateTime()),
     }
     commit_alterations = {
         "committed_at": _compile_column_definition(DateTime()),
@@ -112,6 +175,8 @@ def ensure_database_schema():
     with engine.begin() as connection:
         _apply_column_alterations(connection, "pull_requests", pull_request_columns, pull_request_alterations)
         _apply_column_alterations(connection, "commits", commit_columns, commit_alterations)
+        _apply_column_alterations(connection, "azure_work_items", work_item_columns, work_item_alterations)
+        _apply_column_alterations(connection, "azure_pipeline_runs", run_columns, run_alterations)
         _apply_column_alterations(
             connection,
             "pull_request_comments",

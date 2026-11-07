@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import csv
 import io
-import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -51,7 +50,6 @@ from app.time_window import TimeWindow
 
 SUCCESS_RESULTS = {"succeeded", "partiallysucceeded"}
 FAILURE_RESULTS = {"failed", "canceled", "none"}
-AB_LINK = re.compile(r"AB#(\d+)", re.IGNORECASE)
 # How far before the date range to look for PRs/deployments that ship in it.
 LOOKBACK_FOR_LINKING = timedelta(days=90)
 
@@ -258,27 +256,52 @@ class StoryFilters:
         }
 
 
+def _link_index(db: Session):
+    # Imported here: work_item_links builds on story_lifecycle, which imports this module.
+    from app.lifecycle_config import load_lifecycle_config
+    from app.work_item_links import LinkIndex
+
+    return LinkIndex(db, load_lifecycle_config())
+
+
 def _linked_prs(db: Session) -> dict[int, list[dict[str, Any]]]:
-    """Map Azure work item id -> PRs whose title mentions AB#<id> (Azure Boards GitHub links)."""
-    links: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    rows = (
-        db.query(PullRequest.pr_number, PullRequest.title, PullRequest.merged_at, Repository.name, Developer.github_username)
+    """Map Azure work item id -> linked PRs, with how each was linked.
+
+    Uses every link source of the story lifecycle (Azure Boards links, AB# in the
+    PR title, description or commits, branch names); a child item's PRs also
+    count for its parent story.
+    """
+    index = _link_index(db)
+    rows = {
+        pr_id: (number, merged_at, repo, author)
+        for pr_id, number, merged_at, repo, author in db.query(
+            PullRequest.id, PullRequest.pr_number, PullRequest.merged_at, Repository.name, Developer.github_username
+        )
         .join(Repository, PullRequest.repo_id == Repository.id)
         .join(Developer, PullRequest.developer_id == Developer.id)
-        .filter(PullRequest.title.ilike("%AB#%"))
-        .all()
-    )
-    for number, title, merged_at, repo, author in rows:
-        for match in set(AB_LINK.findall(title or "")):
-            links[int(match)].append(
-                {
-                    "repository": repo,
-                    "pr_number": number,
-                    "author": author,
-                    "merged_at": merged_at.isoformat() if merged_at else None,
-                }
-            )
-    return links
+    }
+    links: dict[int, dict[int, dict[str, Any]]] = defaultdict(dict)
+    for pr_id, work_items in index.by_pr.items():
+        if pr_id not in rows:
+            continue
+        number, merged_at, repo, author = rows[pr_id]
+        for link in work_items.values():
+            targets = {link.id: sorted(link.sources)}
+            if link.story_id and link.story_id != link.id:
+                targets[link.story_id] = [f"via {link.type} #{link.id}"]
+            for work_item_id, sources in targets.items():
+                entry = links[work_item_id].setdefault(
+                    pr_id,
+                    {
+                        "repository": repo,
+                        "pr_number": number,
+                        "author": author,
+                        "merged_at": merged_at.isoformat() if merged_at else None,
+                        "sources": [],
+                    },
+                )
+                entry["sources"] = sorted(set(entry["sources"]) | set(sources))
+    return {work_item_id: list(prs.values()) for work_item_id, prs in links.items()}
 
 
 def _story_dict(item: AzureWorkItem, person: Person | None, linked: list[dict[str, Any]]) -> dict[str, Any]:
@@ -519,8 +542,11 @@ def _repo_keys(name: str | None) -> set[str]:
     return {full, full.rsplit("/", 1)[-1]}
 
 
-def _run_dict(run: AzurePipelineRun, config: DevOpsConfig, team_config: TeamConfig, reasons: list[str]) -> dict[str, Any]:
+def _run_dict(
+    run: AzurePipelineRun, config: DevOpsConfig, team_config: TeamConfig, reasons: list[str], index=None
+) -> dict[str, Any]:
     requester = resolve_person(team_config, run.requested_for_email, run.requested_for)
+    work_items = index.for_run(run) if index is not None else []
     return {
         "id": run.id,
         "project": run.project,
@@ -536,6 +562,10 @@ def _run_dict(run: AzurePipelineRun, config: DevOpsConfig, team_config: TeamConf
         "finish_time": run.finish_time.isoformat() if run.finish_time else None,
         "attributed_by": reasons,
         "url": run.url,
+        # Work items / stories the run built (see app.work_item_links).
+        "work_items": [link.as_dict() for link in work_items],
+        "stories": sorted({link.story_id for link in work_items if link.story_id}),
+        "details_fetched": run.details_fetched_at is not None,
     }
 
 
@@ -749,6 +779,7 @@ def compute_dora(
         )
 
     listed_runs.sort(key=lambda run: run.finish_time, reverse=True)
+    index = _link_index(db) if listed_runs else None
     return {
         "scope": {
             "person": person,
@@ -784,7 +815,7 @@ def compute_dora(
         "pipelines": sorted({run.definition_name for run in (in_range if not scoped else successful + attempts)}),
         "runs_total": len(listed_runs),
         "runs": [
-            _run_dict(run, config, team_config, reasons.get(run.id, []))
+            _run_dict(run, config, team_config, reasons.get(run.id, []), index)
             for run in listed_runs[:MAX_RUNS_LISTED]
         ],
     }
@@ -882,7 +913,7 @@ def markdown_report(
         f"| Median cycle time (active -> closed) | {_md(summary['median_cycle_time_days'])} days |",
         f"| Median lead time (created -> closed) | {_md(summary['median_lead_time_days'])} days |",
         f"| Open items in range | {summary['open']} |",
-        f"| Linked GitHub PRs (AB#) | {summary['linked_pr_count']} |",
+        f"| Linked GitHub PRs | {summary['linked_pr_count']} |",
         "",
     ]
     if dora:

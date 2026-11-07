@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     # Serve the interactive API docs (/docs, /redoc, /openapi.json).
     enable_api_docs: bool = True
     log_level: str = "INFO"
+    # How long startup keeps retrying the database (e.g. while the db container starts).
+    db_connect_timeout_seconds: int = 60
 
     # Snapshots of the ingested data (see app/snapshot.py).
     snapshot_dir: str = "snapshots"
