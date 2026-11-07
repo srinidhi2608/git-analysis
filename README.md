@@ -10,6 +10,7 @@ It pulls PRs, reviews, review comments and commits for the repositories you choo
 - **Pull request timeline**: on Team Overview, every PR with its phases (coding, waiting for review, in review, waiting to merge, waiting to deploy), the stories it belongs to, and flags. It finds **PRs with no story**, unreviewed merges and PRs never deployed. Downloadable as CSV. See [docs/pull-request-timeline.md](docs/pull-request-timeline.md).
 - **Sortable, filterable grids**: click any column header to sort; filter every column (text, value lists, number ranges such as `>5` or `1-10`).
 - **Story Quality (optional, with Azure DevOps)**: every user story's lifecycle from creation to release: time in each stage (Dev, QA, QAA, INT), linked pull requests, developers and testers, rework, integrity flags, and how much of the story's time went into code. Downloadable as CSV. See [docs/story-lifecycle.md](docs/story-lifecycle.md).
+- **Story analyzer (optional, with Azure DevOps)**: a separate page, in the left panel, that reviews one user story with your LLM. It shows the story's health, tags, a colour-coded stage timeline, an analysis of the description, acceptance criteria, attached evidence and comments, and suggested changes. It follows your team's rules in `prompts/story-analysis.md`. See [docs/story-analyzer.md](docs/story-analyzer.md).
 - **AI summary (optional)**: written strengths, improvement areas, design-pattern and DRY/WET notes. These come from an online LLM (OpenAI or Gemini) or a local [Ollama](https://ollama.com) model, based on the actual review comments. A rule-based fallback always works, so no AI setup is required.
 
 > These metrics are signals to start a conversation, not a performance verdict. The AI and heuristic scores come from review comments and PR metadata only. They don't look at the code itself.
@@ -624,6 +625,22 @@ The **Pull request timeline** on Team Overview lists every PR with its phases an
 
 Full details, including how to sort and filter every grid: [docs/pull-request-timeline.md](docs/pull-request-timeline.md).
 
+### 7.7 Story analyzer
+
+The app now has a **left panel** with two pages: **Engineering dashboard** (the dashboard with its tabs) and **Story analyzer** (`/#story-analyzer`).
+
+On the Story analyzer page:
+1. Pick a stored story, or type any story number.
+2. Click **Analyze**.
+
+You get the story's **health** (content quality from the LLM, plus delivery health computed from the board history), its tags and suggested tags, a colour-coded **timeline** of its stages, and an analysis of the **description**, **acceptance criteria**, **evidence** (attachments, inline images, linked PRs) and **comments** (key points, unanswered questions). Last comes a list of **suggested changes** to the story, including rewritten Given/When/Then criteria.
+
+Tick **Deep analysis** to also read the story's parent Feature and Epic, the Word, PDF and text attachments on the story and its parents, and documents you upload. A **Context** card then shows what the story misses or contradicts. Uploads are used for that analysis only and not stored.
+
+Your team's rules for a good story live in [`prompts/story-analysis.md`](prompts/story-analysis.md). They're passed to the LLM as instructions; edit the file to match your process. Without an LLM, a rule-based review is shown.
+
+Details: [docs/story-analyzer.md](docs/story-analyzer.md).
+
 ## 8) Production deployment (HTTPS, certificates, hardening)
 
 The Docker image is ready for production as is. Certificates are handled by the container's entrypoint (`docker/entrypoint.sh`), which runs as root only to prepare them, then starts the app as the unprivileged `appuser`.
@@ -707,6 +724,7 @@ To use an external database, set `DATABASE_URL` in an override and remove the `d
 | `CORS_ALLOW_ORIGINS` | `*` | Comma-separated allowed origins (empty = none) |
 | `ENABLE_API_DOCS` | `true` | Serve `/docs`, `/redoc`, `/openapi.json` |
 | `LOG_LEVEL` | `info` | App and uvicorn log level |
+| `STORY_ANALYSIS_INSTRUCTIONS` | `prompts/story-analysis.md` | Team instructions for the Story analyzer (Markdown, passed to the LLM) |
 | `DB_CONNECT_TIMEOUT_SECONDS` | `60` | How long startup keeps retrying the database before giving up (e.g. while the `db` container starts) |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies trusted for `X-Forwarded-*` |
 | `PORT` | `8000` | Port inside the container (map it with `APP_PORT`) |
@@ -750,6 +768,10 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/devops/report` | Download `?format=csv` or `?format=markdown` for the filtered work items |
 | GET | `/api/pull-requests` | PR timeline rows (phases, stories, work items, flags) and summary; `date_from`/`date_to` (or `days`), `team`, `branches` ([guide](docs/pull-request-timeline.md#6-api-and-csv)) |
 | GET | `/api/reports/pull-requests.csv` | PR timeline CSV |
+| POST | `/api/story-analyzer/analyze/deep` | Deep analysis with parent items, attachments and uploaded documents (multipart) ([guide](docs/story-analyzer.md#3a-deep-analysis-parent-items-attachments-and-your-documents)) |
+| POST | `/api/story-analyzer/analyze` | Analyze one story: `{"work_item_id": 1234, "refresh": true, "use_cache": true}` ([guide](docs/story-analyzer.md#8-api)) |
+| GET | `/api/story-analyzer/stories` | Stories to pick from (`?search=`) |
+| GET | `/api/story-analyzer/instructions` | The team instructions passed to the LLM |
 | GET | `/api/stories/lifecycle` | Story lifecycle rows (timeline, PRs, people, rework, flags) and summary; same filters as the DevOps endpoints plus `status=completed\|all` ([guide](docs/story-lifecycle.md#8-api)) |
 | GET | `/api/reports/{story-lifecycle\|story-transitions\|story-pull-requests}.csv` | Story CSV reports |
 | POST | `/api/snapshots/load` | Load the newest snapshot (or `{"name": ...}`), upserting into the database |
@@ -807,6 +829,10 @@ app/
   story_lifecycle.py    Story lifecycle rows, story ↔ PR links, quality flags, CSV reports
   work_item_links.py    Work item ↔ PR / commit / pipeline run index (stories behind PRs and runs)
   pr_timeline.py        Pull request timeline rows, phases, flags, CSV
+  story_analyzer.py     Story analyzer: facts, rule-based + LLM review, health, cache
+  llm_client.py         JSON chat with the configured LLM (online → Ollama)
+  story_context.py      Deep analysis context: parent Feature/Epic, attachments, uploads
+  document_text.py      Text from Word (.docx), PDF and text documents
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)
@@ -816,9 +842,12 @@ app/
   dora_metrics.py       DORA-inspired metrics and weekly trends
   developer_analytics.py  Per-developer review analytics + narrative
   ai_analyzers.py       Online LLM → Ollama → rule-based analyzer
-frontend/               React + Vite dashboard (src/components: GitAnalyticsDashboard, DevOpsIntegrationPage,
-                        StoryQualityPage, PullRequestTimeline, DataGrid, DateTimeRangePicker + dateRange.ts, BranchSelect)
-docs/                   story-lifecycle.md (Story Quality), pull-request-timeline.md (PR timeline, links, grids)
+frontend/               React + Vite UI: src/App.tsx (left panel + pages); src/components: GitAnalyticsDashboard,
+                        StoryAnalyzerPage, DevOpsIntegrationPage, StoryQualityPage, PullRequestTimeline, DataGrid,
+                        DateTimeRangePicker + dateRange.ts, BranchSelect, stageColors.ts
+docs/                   story-lifecycle.md (Story Quality), pull-request-timeline.md (PR timeline, links, grids),
+                        story-analyzer.md (Story analyzer)
+prompts/                story-analysis.md (team instructions for the Story analyzer)
 scripts/                seed_data.sql (demo data), seed_devops.sql (Azure demo data), clear_data.sql (wipe data)
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse
