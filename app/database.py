@@ -166,6 +166,8 @@ def ensure_database_schema():
     work_item_alterations = {
         "parent_id": _compile_column_definition(Integer()),
         "history_changed_date": _compile_column_definition(DateTime()),
+        "description": _compile_column_definition(Text()),
+        "acceptance_criteria": _compile_column_definition(Text()),
     }
     commit_alterations = {
         "committed_at": _compile_column_definition(DateTime()),

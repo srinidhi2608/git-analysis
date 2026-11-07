@@ -28,6 +28,8 @@
 --         role: developer
 -- =============================================================================
 
+DELETE FROM azure_work_item_comments WHERE work_item_id BETWEEN 1000 AND 1999;
+DELETE FROM story_analyses WHERE work_item_id BETWEEN 1000 AND 1999;
 DELETE FROM azure_work_item_state_changes WHERE work_item_id BETWEEN 1000 AND 1999;
 DELETE FROM azure_work_item_relations WHERE work_item_id BETWEEN 1000 AND 1999;
 DELETE FROM azure_work_item_tags WHERE work_item_id BETWEEN 1000 AND 1999;
@@ -374,3 +376,34 @@ UPDATE azure_pipeline_runs
 SET change_work_item_refs = CASE WHEN (build_id - 5300) % 2 = 0 THEN '1013' ELSE '1014' END,
     details_fetched_at = now() AT TIME ZONE 'UTC'
 WHERE project = 'Platform' AND build_id BETWEEN 5301 AND 5312;
+
+-- ─── Story text, attachments and comments (Story Analyzer) ──────────────────
+-- 1011 is a well-written story with test evidence; 1013 is vague with an open
+-- question; 1009 has no failure scenarios and no evidence; 1001 has only a
+-- description.
+UPDATE azure_work_items SET
+  description = '<div>As a returning customer, I want to save my card at checkout so that I can pay faster next time.</div><ul><li>Cards are tokenised by the payment provider; we never store card numbers.</li><li>Web checkout only; the mobile app follows in a later story.</li></ul><p>Design: <a href="https://figma.example/saved-cards">Figma</a></p>',
+  acceptance_criteria = '<ul><li>Given a logged-in customer, when they tick "Save card" and pay, then the card appears under Payment methods.</li><li>Given a saved card, when the customer checks out, then the card is preselected and payment completes in under 3 seconds.</li><li>Given an expired saved card, when the customer pays, then an error explains the card expired and no order is created.</li><li>Given a customer with a saved card, when they delete it, then it is removed from the provider and from Payment methods.</li></ul>'
+WHERE id = 1011;
+UPDATE azure_work_items SET
+  description = '<p>Add rate limiting to the public API.</p>',
+  acceptance_criteria = '<p>API should be fast and handle load properly etc.</p>'
+WHERE id = 1013;
+UPDATE azure_work_items SET
+  description = '<div>As a shopper, I want a cleaner product listing so that I can compare products quickly.</div><p>Show image, price, rating and delivery estimate on each card.</p>',
+  acceptance_criteria = '<ul><li>Given the listing page, when it loads, then each card shows image, price, rating and delivery estimate.</li><li>Given more than 24 products, when the shopper scrolls, then the next page loads.</li></ul>'
+WHERE id = 1009;
+UPDATE azure_work_items SET
+  description = '<div>As a user, I want to sign in with my company account so that I don''t need another password.</div>'
+WHERE id = 1001;
+
+INSERT INTO azure_work_item_relations (work_item_id, rel, name, url, target_id) VALUES
+  (1011, 'AttachedFile', 'checkout-saved-card-screenshot.png', 'https://dev.azure.com/acme/Platform/_apis/wit/attachments/demo-1?fileName=checkout-saved-card-screenshot.png', NULL),
+  (1011, 'AttachedFile', 'QAA-test-run-report.pdf', 'https://dev.azure.com/acme/Platform/_apis/wit/attachments/demo-2?fileName=QAA-test-run-report.pdf', NULL),
+  (1013, 'AttachedFile', 'notes.txt', 'https://dev.azure.com/acme/Platform/_apis/wit/attachments/demo-3?fileName=notes.txt', NULL);
+
+INSERT INTO azure_work_item_comments (work_item_id, comment_id, author, author_email, created_at, text) VALUES
+  (1011, 1, 'Tom QA', 'tom@acme.dev', (now() AT TIME ZONE 'UTC') - interval '6 days', '<p>Does deleting a card also remove it from the provider?</p>'),
+  (1011, 2, 'Bob Brown', 'bob@acme.dev', (now() AT TIME ZONE 'UTC') - interval '6 days' + interval '2 hours', '<p>Yes, we call the provider''s delete endpoint. Added it as the 4th criterion.</p>'),
+  (1011, 3, 'Tom QA', 'tom@acme.dev', (now() AT TIME ZONE 'UTC') - interval '5 days', '<p>Verified in QAA, report attached. <img src="https://dev.azure.com/acme/x.png"></p>'),
+  (1013, 1, 'Tom QA', 'tom@acme.dev', (now() AT TIME ZONE 'UTC') - interval '2 days', '<p>What limit should we use per client, and what status code is returned when it is exceeded?</p>');

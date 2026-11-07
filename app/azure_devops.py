@@ -51,7 +51,10 @@ WORK_ITEM_FIELDS = [
     "Microsoft.VSTS.Scheduling.StoryPoints",
     "Microsoft.VSTS.Scheduling.Effort",
     "System.Parent",
+    "System.Description",
+    "Microsoft.VSTS.Common.AcceptanceCriteria",
 ]
+COMMENTS_API_VERSION = "7.1-preview.4"
 UPDATES_PAGE_SIZE = 200
 AB_REFERENCE = re.compile(r"AB#(\d+)", re.IGNORECASE)
 GIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
@@ -203,7 +206,53 @@ class AzureDevOpsClient:
             "tags": split_tags(fields.get("System.Tags")),
             "url": f"{self.base_url}/{quote(project, safe='')}/_workitems/edit/{work_item_id}",
             "parent_id": int(fields["System.Parent"]) if fields.get("System.Parent") else None,
+            "description": fields.get("System.Description"),
+            "acceptance_criteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria"),
         }
+
+    def fetch_work_item(self, project: str | None, work_item_id: int) -> dict[str, Any]:
+        """One work item with its current links (attachments included).
+
+        ``project`` may be unknown (a story typed in by number): the
+        organization-level URL finds the item in any project.
+        Returns ``{"item": <normalized fields>, "relations": [...]}``.
+        """
+        url = (
+            self._project_url(project, f"wit/workitems/{work_item_id}")
+            if project
+            else f"{self.base_url}/_apis/wit/workitems/{work_item_id}"
+        )
+        raw = self._request("GET", url, params={"$expand": "relations"}).json()
+        relations = [_normalize_relation(link) for link in raw.get("relations") or [] if link.get("url") and link.get("rel")]
+        item_project = (raw.get("fields") or {}).get("System.TeamProject") or project or ""
+        return {"item": self.normalize_work_item(item_project, raw), "relations": relations}
+
+    def fetch_comments(self, project: str, work_item_id: int) -> list[dict[str, Any]]:
+        """Discussion comments of a work item (Comments API, preview version)."""
+        comments: list[dict[str, Any]] = []
+        continuation: str | None = None
+        while True:
+            params: dict[str, Any] = {"api-version": COMMENTS_API_VERSION, "$top": 200}
+            if continuation:
+                params["continuationToken"] = continuation
+            response = self._request("GET", self._project_url(project, f"wit/workItems/{work_item_id}/comments"), params=params)
+            body = response.json()
+            for comment in body.get("comments", []):
+                if comment.get("isDeleted"):
+                    continue
+                name, email = _identity(comment.get("createdBy"))
+                comments.append(
+                    {
+                        "comment_id": int(comment["id"]),
+                        "author": name,
+                        "author_email": email,
+                        "created_at": _date(comment.get("createdDate")),
+                        "text": comment.get("text") or "",
+                    }
+                )
+            continuation = body.get("continuationToken")
+            if not continuation:
+                return comments
 
     # ------------------------------------------------------------------
     # Work item history
@@ -360,6 +409,7 @@ def _normalize_relation(link: dict[str, Any]) -> dict[str, Any]:
     match = WORK_ITEM_URL.search(url)
     return {
         "rel": link["rel"],
+        # Link type name ("Child", "GitHub Pull Request", ...) or, for attachments, the file name.
         "name": (link.get("attributes") or {}).get("name"),
         "url": url,
         "target_id": int(match.group(1)) if match else None,

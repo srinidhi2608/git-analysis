@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import DataGrid, { type Column } from "./DataGrid";
+import { KIND_COLORS, stageColorMap } from "./stageColors";
 import { type DateRange, rangeLabel, rangeToApi } from "./dateRange";
 
 // ---------------------------------------------------------------------------
@@ -136,16 +137,6 @@ const FLAG_LABELS: Record<string, string> = {
   no_history: "No state history yet",
 };
 
-const KIND_COLORS: Record<StageKind, string> = {
-  wait: "bg-slate-600",
-  work: "bg-sky-500",
-  released: "bg-emerald-500",
-  closed: "bg-slate-400",
-  other: "bg-rose-500",
-};
-// Distinct colors for the testing work stages, by position after development.
-const TEST_COLORS = ["bg-amber-500", "bg-violet-500", "bg-fuchsia-500", "bg-orange-500"];
-
 const OUTCOME_STYLES: Record<StoryRow["outcome"], string> = {
   released: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
   closed_unreleased: "border-slate-500/40 bg-slate-500/10 text-slate-300",
@@ -263,16 +254,7 @@ export default function StoryQualityPage({ dateRange }: { dateRange: DateRange }
   }, [load]);
 
   const stages = useMemo(() => data?.config.stages ?? [], [data]);
-  const stageColor = useMemo(() => {
-    const colors: Record<string, string> = {};
-    const devOrder = stages.find((s) => s.kind === "work")?.order ?? -1;
-    let testIndex = 0;
-    for (const stage of stages) {
-      if (stage.kind === "work" && stage.order > devOrder) colors[stage.name] = TEST_COLORS[testIndex++ % TEST_COLORS.length];
-      else colors[stage.name] = KIND_COLORS[stage.kind];
-    }
-    return colors;
-  }, [stages]);
+  const stageColor = useMemo(() => stageColorMap(stages), [stages]);
 
   const stories = useMemo(() => data?.stories ?? [], [data]);
 

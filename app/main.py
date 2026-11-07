@@ -33,6 +33,7 @@ from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_s
 from app.teams import load_team_config
 from app.time_window import TimeWindow
 from app.lifecycle_config import load_lifecycle_config
+from app.story_analyzer import StoryNotFoundError, analyze_story, list_stories, load_instructions
 from app.pr_timeline import build_pr_rows, pr_timeline_csv, summarize_prs
 from app.work_item_links import LinkIndex
 from app.story_lifecycle import (
@@ -1071,6 +1072,55 @@ def story_report_csv(report: str, filters: StoryFilters = Depends(story_filters)
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{report}-{stamp}.csv"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Story Analyzer
+# ---------------------------------------------------------------------------
+
+
+class StoryAnalyzeRequest(BaseModel):
+    work_item_id: int
+    # Reload the story, its links and comments from Azure DevOps first.
+    refresh: bool = True
+    # Reuse the last result when nothing changed (no LLM call).
+    use_cache: bool = True
+
+
+@app.get("/api/story-analyzer/stories")
+def story_analyzer_stories(search: str | None = None, db: Session = Depends(get_db)):
+    """Stories to pick from (most recently changed first), with when each was last analyzed."""
+    return {"stories": list_stories(db, load_lifecycle_config(), search)}
+
+
+@app.get("/api/story-analyzer/instructions")
+def story_analyzer_instructions():
+    """The team's analysis instructions passed to the LLM (prompts/story-analysis.md)."""
+    return load_instructions()
+
+
+@app.post("/api/story-analyzer/analyze")
+async def story_analyzer_analyze(request: Request, payload: StoryAnalyzeRequest, db: Session = Depends(get_db)):
+    """Analyze one story: health, content quality (LLM), delivery timeline and suggested changes."""
+    try:
+        return await cancel_on_disconnect(
+            request,
+            analyze_story(
+                db,
+                payload.work_item_id,
+                load_lifecycle_config(),
+                load_team_config(),
+                devops=load_devops_config(),
+                refresh=payload.refresh,
+                use_cache=payload.use_cache,
+            ),
+        )
+    except StoryNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HTTPException as exc:
+        if exc.status_code == CLIENT_CLOSED_REQUEST:
+            logger.info("Story analysis of %s cancelled: the client disconnected.", payload.work_item_id)
+        raise
 
 
 # ---------------------------------------------------------------------------

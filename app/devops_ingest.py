@@ -14,6 +14,7 @@ from app.devops_config import DevOpsConfig, load_devops_config
 from app.models import (
     AzurePipelineRun,
     AzureWorkItem,
+    AzureWorkItemComment,
     AzureWorkItemRelation,
     AzureWorkItemStateChange,
     AzureWorkItemTag,
@@ -71,6 +72,8 @@ WORK_ITEM_FIELDS = (
     "area_path",
     "url",
     "parent_id",
+    "description",
+    "acceptance_criteria",
 )
 # Filled from the Builds API "workitems" / "changes" of a run (not part of the run listing).
 RUN_DETAIL_FIELDS = ("build_work_item_ids", "change_shas", "change_work_item_refs")
@@ -137,6 +140,23 @@ def replace_history(db: Session, item: AzureWorkItem, history: list[dict], relat
                 name=(link.get("name") or None) and link["name"][:255],
                 url=link["url"][:1024],
                 target_id=link.get("target_id"),
+            )
+        )
+
+
+def replace_comments(db: Session, item: AzureWorkItem, comments: list[dict]) -> None:
+    """Replace the stored discussion comments of ``item``."""
+    item.comments.clear()
+    db.flush()
+    for comment in comments:
+        created = comment.get("created_at")
+        item.comments.append(
+            AzureWorkItemComment(
+                comment_id=int(comment["comment_id"]),
+                author=comment.get("author"),
+                author_email=comment.get("author_email"),
+                created_at=parse_azure_datetime(created) if isinstance(created, str) else created,
+                text=comment.get("text") or "",
             )
         )
 

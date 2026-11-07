@@ -30,6 +30,7 @@ from app.devops_ingest import (
     RUN_FIELDS,
     WORK_ITEM_DATE_FIELDS,
     WORK_ITEM_FIELDS,
+    replace_comments,
     replace_history,
     upsert_pipeline_run,
     upsert_work_item,
@@ -200,9 +201,22 @@ def export_data(db: Session) -> dict[str, Any]:
                     {"rel": link.rel, "name": link.name, "url": link.url, "target_id": link.target_id}
                     for link in item.relations
                 ],
+                "comments": [
+                    {
+                        "comment_id": comment.comment_id,
+                        "author": comment.author,
+                        "author_email": comment.author_email,
+                        "created_at": _dump_value(comment.created_at),
+                        "text": comment.text,
+                    }
+                    for comment in item.comments
+                ],
             }
             for item in db.query(AzureWorkItem).options(
-                selectinload(AzureWorkItem.tags), selectinload(AzureWorkItem.history), selectinload(AzureWorkItem.relations)
+                selectinload(AzureWorkItem.tags),
+                selectinload(AzureWorkItem.history),
+                selectinload(AzureWorkItem.relations),
+                selectinload(AzureWorkItem.comments),
             )
         ],
         "azure_pipeline_runs": [
@@ -312,6 +326,10 @@ def import_data(db: Session, data: dict[str, Any]) -> dict[str, int]:
                 row.get("relations") or [],
             )
             item.history_changed_date = _load_value("history_changed_date", row.get("history_changed_date"))
+        if row.get("comments"):
+            replace_comments(
+                db, item, [{**c, "created_at": _load_value("created_at", c.get("created_at"))} for c in row["comments"]]
+            )
     for row in data.get("azure_pipeline_runs", []):
         run = upsert_pipeline_run(db, {**row, **{field: _load_value(field, row.get(field)) for field in RUN_DATE_FIELDS}})
         if "details_fetched_at" in row:

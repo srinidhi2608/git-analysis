@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     # How long startup keeps retrying the database (e.g. while the db container starts).
     db_connect_timeout_seconds: int = 60
+    # Team instructions for the Story Analyzer (Markdown, passed to the LLM).
+    story_analysis_instructions: str = "prompts/story-analysis.md"
 
     # Snapshots of the ingested data (see app/snapshot.py).
     snapshot_dir: str = "snapshots"
