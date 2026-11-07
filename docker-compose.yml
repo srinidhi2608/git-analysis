@@ -30,6 +30,12 @@ services:
       - postgres_data:/var/lib/postgresql/data
       # Sample data scripts: docker compose exec db psql -U git_user -d git_analysis -f /scripts/seed_data.sql
       - ./scripts:/scripts:ro
+    networks:
+      backend:
+        # Fixed address so the app reaches the database without Docker's DNS
+        # (see `extra_hosts` on app). Change DB_IP / DOCKER_SUBNET in .env if
+        # the range clashes with your network or VPN.
+        ipv4_address: ${DB_IP:-172.31.253.10}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U git_user -d git_analysis"]
       interval: 5s
@@ -59,6 +65,14 @@ services:
     extra_hosts:
       # Makes host.docker.internal resolve on Linux too (built in on Docker Desktop).
       - "host.docker.internal:host-gateway"
+      # "db" and "ollama" are written into the container's /etc/hosts, so the app
+      # finds them even when Docker's internal DNS does not work (seen with
+      # Docker Desktop behind some VPNs/corporate DNS: "could not translate host
+      # name "db" to address: Temporary failure in name resolution").
+      - "db:${DB_IP:-172.31.253.10}"
+      - "ollama:${OLLAMA_IP:-172.31.253.11}"
+    networks:
+      - backend
     depends_on:
       db:
         condition: service_healthy
@@ -93,8 +107,20 @@ services:
     image: ollama/ollama:0.12.6
     profiles: ["ollama"]
     restart: unless-stopped
+    networks:
+      backend:
+        ipv4_address: ${OLLAMA_IP:-172.31.253.11}
     volumes:
       - ollama_data:/root/.ollama
+
+networks:
+  backend:
+    ipam:
+      config:
+        # Private range for these containers. If `docker compose up` reports
+        # "Pool overlaps with other one on this address space", or it clashes
+        # with your VPN, set DOCKER_SUBNET, DB_IP and OLLAMA_IP in .env.
+        - subnet: ${DOCKER_SUBNET:-172.31.253.0/24}
 
 volumes:
   postgres_data:

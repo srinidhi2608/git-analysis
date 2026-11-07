@@ -82,7 +82,14 @@ except ValueError:
                         log "warning: $APP_USER cannot resolve database host '$db_host' and /etc/hosts is not writable"
                     fi
                 else
-                    log "database host '$db_host' does not resolve yet (is the db container running?); the app will keep retrying"
+                    log "database host '$db_host' does not resolve; the app will keep retrying. Diagnosis:"
+                    log "  DNS servers in /etc/resolv.conf: $(grep -s '^nameserver' /etc/resolv.conf | awk '{print $2}' | tr '\n' ' ')"
+                    if python -c "$resolve" github.com >/dev/null 2>&1; then
+                        log "  DNS works (github.com resolves) but '$db_host' is unknown: the db container is not running or not on this network (docker compose ps -a; docker compose logs db)"
+                    else
+                        log "  DNS does not work in this container at all (github.com does not resolve either): Docker's DNS is blocked, often by a VPN or security software."
+                        log "  docker-compose.yml maps '$db_host' in /etc/hosts (extra_hosts) to avoid DNS; make sure you run this repository's docker-compose.yml"
+                    fi
                 fi
             fi
             ;;
