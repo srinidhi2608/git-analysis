@@ -706,6 +706,7 @@ To use an external database, set `DATABASE_URL` in an override and remove the `d
 | `CORS_ALLOW_ORIGINS` | `*` | Comma-separated allowed origins (empty = none) |
 | `ENABLE_API_DOCS` | `true` | Serve `/docs`, `/redoc`, `/openapi.json` |
 | `LOG_LEVEL` | `info` | App and uvicorn log level |
+| `DB_CONNECT_TIMEOUT_SECONDS` | `60` | How long startup keeps retrying the database before giving up (e.g. while the `db` container starts) |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies trusted for `X-Forwarded-*` |
 | `PORT` | `8000` | Port inside the container (map it with `APP_PORT`) |
 | `WEB_CONCURRENCY` | `1` | Uvicorn workers. **Keep 1:** the one-sync-at-a-time lock and sync status live in the process. For more capacity, give the container more CPU/memory |
@@ -871,6 +872,7 @@ npm run build
 | Sync finishes but nothing appears | Check `docker compose logs app`. *"GitHub rejected the request (401/403)"* means the token is invalid or lacks access to the repository. Also try a wider date range: only PRs updated in that range are imported |
 | App container exits with a `github_token` / `database_url` "Field required" error | `GITHUB_TOKEN` is missing from `.env` (or `DATABASE_URL` when running without Docker) |
 | `password authentication failed` after changing `POSTGRES_PASSWORD` | The password is fixed when the volume is first created. Run `docker compose down -v` (deletes data), then start again |
+| App logs `could not translate host name "db"` / `Database db:5432 not reachable yet` | The `db` container isn't running: it is still starting, restarting, stopped, or was never started. The app retries for `DB_CONNECT_TIMEOUT_SECONDS` (60 s) and then exits with an explanation. Run `docker compose ps` and `docker compose logs db`, then start both with `docker compose up -d` (don't use `--no-deps` or start only `app`). If `db` keeps restarting, its log says why. A common cause is a volume created with another `POSTGRES_PASSWORD` or Postgres version: back up, then `docker compose down -v`. Also make sure both services come from the same folder/project (same Compose network) |
 | `port is already allocated` | Set `APP_PORT` or `POSTGRES_PORT` in `.env` |
 | `Could not create unique index ...` warning on startup | An older version stored duplicate PRs. Run `scripts/clear_data.sql` and sync again |
 | Logs say `LocalOllamaHandler returned no usable analysis` | The model answered without usable values (e.g. all `null`), so the rule-based analysis is used. Partial answers are kept, and missing fields are filled from the rule-based analysis (logged as `... filled from the heuristic analysis`). Small models do this more often; try a larger `OLLAMA_MODEL` or Ollama 0.5+, which supports the JSON schema the app sends |
