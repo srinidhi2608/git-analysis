@@ -85,6 +85,30 @@ interface Analysis {
     comments: { author: string | null; created_at: string | null; text: string; images: number }[];
     children: { id: number; type: string; title: string; state: string | null }[];
   };
+  context: StoryContext | null;
+}
+
+interface StoryContext {
+  parents: { id: number; type: string; title: string; state: string | null; url: string | null; attachments: string[]; description: string }[];
+  documents: { name: string; source: string; used: boolean; skipped: string | null; characters: number }[];
+  review: { score: number | null; assessment: string; gaps: string[]; conflicts: string[]; sources_used: string[] } | null;
+}
+
+// Uploads accepted for a deep analysis (the server checks the same limits).
+const UPLOAD_ACCEPT = ".docx,.pdf,.txt,.md,.csv,.log,.json,.xml,.yaml,.yml";
+const MAX_UPLOADS = 5;
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+function uploadProblem(file: File): string | null {
+  const extension = file.name.includes(".") ? `.${file.name.split(".").pop()!.toLowerCase()}` : "";
+  if (extension === ".doc") return `${file.name}: old Word format; save it as .docx`;
+  if (!UPLOAD_ACCEPT.split(",").includes(extension)) return `${file.name}: only Word (.docx), PDF and text files can be used`;
+  if (file.size > MAX_UPLOAD_BYTES) return `${file.name}: larger than 10 MB`;
+  return null;
+}
+
+function fileSize(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 interface Instructions {
@@ -172,6 +196,12 @@ export default function StoryAnalyzerPage() {
   const [storyNumber, setStoryNumber] = useState("");
   const [refresh, setRefresh] = useState(true);
   const [rerun, setRerun] = useState(false);
+  // Deep analysis (only when ticked): parent Feature/Epic, attachments, uploaded documents.
+  const [deep, setDeep] = useState(false);
+  const [includeParents, setIncludeParents] = useState(true);
+  const [includeAttachments, setIncludeAttachments] = useState(true);
+  const [files, setFiles] = useState<File[]>([]);
+  const [fileError, setFileError] = useState("");
   const [instructions, setInstructions] = useState<Instructions | null>(null);
   const [showInstructions, setShowInstructions] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -212,12 +242,24 @@ export default function StoryAnalyzerPage() {
       setAnalysis(null);
       setStoryNumber(String(id));
       try {
-        const res = await fetch("/api/story-analyzer/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ work_item_id: id, refresh, use_cache: !rerun }),
-          signal: controller.signal,
-        });
+        let res: Response;
+        if (deep) {
+          const form = new FormData();
+          form.append("work_item_id", String(id));
+          form.append("refresh", String(refresh));
+          form.append("use_cache", String(!rerun));
+          form.append("include_parents", String(includeParents));
+          form.append("include_attachments", String(includeAttachments));
+          files.forEach((file) => form.append("files", file, file.name));
+          res = await fetch("/api/story-analyzer/analyze/deep", { method: "POST", body: form, signal: controller.signal });
+        } else {
+          res = await fetch("/api/story-analyzer/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ work_item_id: id, refresh, use_cache: !rerun }),
+            signal: controller.signal,
+          });
+        }
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail ?? `${res.status} ${res.statusText}`);
         if (abortRef.current === controller) setAnalysis(data as Analysis);
@@ -227,8 +269,23 @@ export default function StoryAnalyzerPage() {
         if (abortRef.current === controller) setRunning(false);
       }
     },
-    [refresh, rerun],
+    [refresh, rerun, deep, includeParents, includeAttachments, files],
   );
+
+  const addFiles = (list: FileList | null) => {
+    if (!list) return;
+    const problems: string[] = [];
+    const next = [...files];
+    for (const file of Array.from(list)) {
+      const problem = uploadProblem(file);
+      if (problem) problems.push(problem);
+      else if (next.some((existing) => existing.name === file.name && existing.size === file.size)) continue;
+      else if (next.length >= MAX_UPLOADS) problems.push(`${file.name}: at most ${MAX_UPLOADS} documents`);
+      else next.push(file);
+    }
+    setFiles(next);
+    setFileError(problems.join(" · "));
+  };
 
   const cancel = () => {
     abortRef.current?.abort();
@@ -322,6 +379,66 @@ export default function StoryAnalyzerPage() {
               <input checked={rerun} className="h-4 w-4 accent-indigo-500" onChange={(e) => setRerun(e.target.checked)} type="checkbox" />
               Re-run even if nothing changed
             </label>
+            <label className="flex items-start gap-2 text-sm text-slate-300" title="Slower: reads more and sends it to the LLM">
+              <input checked={deep} className="mt-0.5 h-4 w-4 accent-indigo-500" onChange={(e) => setDeep(e.target.checked)} type="checkbox" />
+              <span>
+                Deep analysis
+                <span className="block text-xs text-slate-500">Also read the parent Feature, attachments and your documents</span>
+              </span>
+            </label>
+            {deep && (
+              <fieldset className="space-y-2 rounded-lg border border-slate-700 p-3">
+                <legend className="px-1 text-xs text-slate-400">Context to include</legend>
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input checked={includeParents} className="h-4 w-4 accent-indigo-500" onChange={(e) => setIncludeParents(e.target.checked)} type="checkbox" />
+                  Parent Feature / Epic
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input checked={includeAttachments} className="h-4 w-4 accent-indigo-500" onChange={(e) => setIncludeAttachments(e.target.checked)} type="checkbox" />
+                  Attachments on the story and its parents
+                </label>
+                <div>
+                  <label
+                    className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-slate-600 px-3 py-2 text-sm text-slate-200 hover:border-indigo-400"
+                    htmlFor="story-documents"
+                  >
+                    ⤒ Upload documents
+                  </label>
+                  <input
+                    accept={UPLOAD_ACCEPT}
+                    className="sr-only"
+                    id="story-documents"
+                    multiple
+                    onChange={(e) => {
+                      addFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                    type="file"
+                  />
+                  <p className="mt-1 text-xs text-slate-500">Word (.docx), PDF or text · up to {MAX_UPLOADS} files, 10 MB each · used for this analysis only, not stored</p>
+                </div>
+                {files.length > 0 && (
+                  <ul aria-label="Documents to upload" className="space-y-1 text-xs">
+                    {files.map((file) => (
+                      <li className="flex items-center justify-between gap-2 rounded border border-slate-800 px-2 py-1" key={`${file.name}-${file.size}`}>
+                        <span className="min-w-0 truncate text-slate-200" title={file.name}>
+                          {file.name} <span className="text-slate-500">({fileSize(file.size)})</span>
+                        </span>
+                        <button
+                          aria-label={`Remove ${file.name}`}
+                          className="shrink-0 text-slate-400 hover:text-rose-300"
+                          onClick={() => setFiles(files.filter((existing) => existing !== file))}
+                          type="button"
+                        >
+                          ✕
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {fileError && <p className="text-xs text-rose-300">{fileError}</p>}
+              </fieldset>
+            )}
             {running ? (
               <button className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" onClick={cancel} type="button">
                 Cancel
@@ -358,7 +475,9 @@ export default function StoryAnalyzerPage() {
 
       {running && (
         <Card>
-          <Spinner label={`Analyzing story #${storyNumber}… an LLM review can take up to a minute.`} />
+          <Spinner
+            label={`Analyzing story #${storyNumber}${deep ? " with its parent items and documents" : ""}… an LLM review can take up to a minute${deep ? " or two" : ""}.`}
+          />
         </Card>
       )}
       {error && <p className="rounded-lg bg-red-900/40 px-4 py-3 text-sm text-red-300">{error}</p>}
@@ -400,6 +519,7 @@ function AnalysisView({ analysis }: { analysis: Analysis }) {
             <p className="mt-4 max-w-3xl text-sm text-slate-200">{health.summary}</p>
             <p className="mt-3 text-xs text-slate-500">
               Analyzed {when(analysis.analyzed_at)} by {analysis.provider}
+              {analysis.context ? " · deep analysis (parent items and documents)" : ""}
               {analysis.cached ? " · reused (nothing changed since)" : ""}
               {analysis.instructions.used ? ` · with team instructions (${analysis.instructions.path})` : ""}
             </p>
@@ -495,8 +615,99 @@ function AnalysisView({ analysis }: { analysis: Analysis }) {
         ))}
       </div>
 
+      {analysis.context && <ContextCard context={analysis.context} />}
+
       <SuggestionsCard analysis={analysis} />
     </div>
+  );
+}
+
+function ContextCard({ context }: { context: StoryContext }) {
+  const review = context.review;
+  return (
+    <Card>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-white">Context: parent items and documents</h3>
+          <p className="mt-1 text-xs text-slate-500">Deep analysis. How well the story covers and agrees with its Feature and documents; not part of the health score.</p>
+        </div>
+        {review?.score != null && (
+          <span className={`rounded-full px-2.5 py-0.5 text-sm font-medium text-slate-950 ${scoreColor(review.score)}`} title="Context alignment">
+            {review.score}
+          </span>
+        )}
+      </div>
+      {review && (
+        <>
+          <p className="mt-3 text-sm text-slate-300">{review.assessment}</p>
+          {review.gaps.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs uppercase tracking-wide text-slate-400">Missing from the story</p>
+              <List items={review.gaps} tone="bad" />
+            </div>
+          )}
+          {review.conflicts.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs uppercase tracking-wide text-slate-400">Conflicts</p>
+              <List items={review.conflicts} tone="bad" />
+            </div>
+          )}
+          {review.sources_used.length > 0 && <p className="mt-3 text-xs text-slate-500">Sources used: {review.sources_used.join(", ")}</p>}
+        </>
+      )}
+
+      <div className="mt-5 grid gap-6 lg:grid-cols-2">
+        <div className="min-w-0">
+          <p className="text-xs uppercase tracking-wide text-slate-400">Parent items ({context.parents.length})</p>
+          {context.parents.length === 0 ? (
+            <p className="mt-2 text-sm text-slate-500">Not included or none found.</p>
+          ) : (
+            <ul className="mt-2 space-y-2 text-sm">
+              {context.parents.map((parent) => (
+                <li className="rounded-lg border border-slate-800 px-3 py-2" key={parent.id}>
+                  <span className="font-mono text-xs text-slate-500">
+                    {parent.type} #{parent.id}
+                  </span>{" "}
+                  {parent.url ? (
+                    <a className="text-sky-300 hover:underline" href={parent.url} rel="noreferrer" target="_blank">
+                      {parent.title}
+                    </a>
+                  ) : (
+                    <span className="text-slate-100">{parent.title}</span>
+                  )}
+                  <span className="text-xs text-slate-500"> · {parent.state ?? "—"}</span>
+                  {parent.description && <p className="mt-1 line-clamp-3 text-xs text-slate-400">{parent.description}</p>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="min-w-0">
+          <p className="text-xs uppercase tracking-wide text-slate-400">Documents ({context.documents.length})</p>
+          {context.documents.length === 0 ? (
+            <p className="mt-2 text-sm text-slate-500">No attachments or uploads.</p>
+          ) : (
+            <ul className="mt-2 space-y-1 text-sm">
+              {context.documents.map((document, index) => (
+                <li className="flex items-start justify-between gap-3 rounded border border-slate-800 px-3 py-1.5" key={`${document.source}-${document.name}-${index}`}>
+                  <span className="min-w-0">
+                    <span className="break-words text-slate-100">{document.name}</span>
+                    <span className="block text-xs text-slate-500">{document.source}</span>
+                  </span>
+                  {document.used ? (
+                    <span className="shrink-0 rounded-full border border-emerald-500/40 px-2 py-0.5 text-[11px] text-emerald-300">
+                      read · {document.characters.toLocaleString()} chars
+                    </span>
+                  ) : (
+                    <span className="max-w-[14rem] shrink-0 text-right text-[11px] text-amber-300">{document.skipped}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </Card>
   );
 }
 

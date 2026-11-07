@@ -16,6 +16,7 @@ The review is done by your configured LLM, following your team's instructions in
 1. [Use it](#1-use-it)
 2. [What it shows](#2-what-it-shows)
 3. [How health is calculated](#3-how-health-is-calculated)
+   - [3a) Deep analysis: parent items, attachments and your documents](#3a-deep-analysis-parent-items-attachments-and-your-documents)
 4. [Team instructions (`prompts/story-analysis.md`)](#4-team-instructions-promptsstory-analysismd)
 5. [LLM and fallback](#5-llm-and-fallback)
 6. [Data it reads](#6-data-it-reads)
@@ -36,6 +37,7 @@ The review is done by your configured LLM, following your team's instructions in
 Options:
 - **Load the latest from Azure DevOps** (on by default) reloads the story's fields, links, attachments and comments before analyzing.
 - **Re-run even if nothing changed** asks the LLM again instead of reusing the last result (see [Caching](#7-caching)).
+- **Deep analysis** (off by default) also reads the parent Feature/Epic, the story's and parents' attachments, and documents you upload (see [3a](#3a-deep-analysis-parent-items-attachments-and-your-documents)).
 
 ---
 
@@ -86,6 +88,43 @@ Options:
 | A linked PR closed without merging | −5 |
 | Released without a `Release x.y.z` tag | −5 |
 | Visited a state missing from the stage mapping | −5 |
+
+---
+
+## 3a) Deep analysis: parent items, attachments and your documents
+
+By default the review looks only at the story itself. Tick **Deep analysis** to give it the surrounding context. Each part can be switched off:
+
+| Option | What is read |
+|---|---|
+| **Parent Feature / Epic** | The story's parent work item, usually the Feature, and its parent, usually the Epic: title, state, description, acceptance criteria and the names of their attachments. Reloaded from Azure DevOps when it is configured |
+| **Attachments on the story and its parents** | Files attached to the story and to those parents, downloaded from Azure DevOps. Word (`.docx`), PDF and text files are read; images and other types are listed but not read |
+| **Upload documents** | Up to 5 files from your machine: Word (`.docx`), PDF or text (`.txt`, `.md`, `.csv`, `.log`, `.json`, `.xml`, `.yaml`), each up to 10 MB. They're used for this analysis only and **not stored**; only their names and sizes are saved with the result |
+
+Limits:
+- Old Word files (`.doc`) aren't read: save them as `.docx`.
+- Scanned PDFs without a text layer have no text to read.
+- At most 10 attachments are downloaded.
+- About 30,000 characters of context in total go to the LLM, shared between the parents and documents; longer texts are cut off.
+
+**What you get:** a **Context** card showing:
+- **Alignment score** (0–100): how well the story covers and agrees with its Feature and documents.
+- **Missing from the story:** requirements stated in the Feature or documents that the story doesn't cover.
+- **Conflicts:** where the story disagrees with them.
+- **Sources used** by the LLM.
+- **Parent items** and every **document** with its source (story, Feature #…, Epic #…, uploaded), and whether it was **read** or why it was skipped.
+
+The other sections and the suggestions also take the context into account and cite their sources. Without an LLM, the rule-based fallback lists the most frequent terms of the Feature and documents that the story never mentions.
+
+The context review is shown separately and **doesn't change the health score**, so scores stay comparable between normal and deep analyses.
+
+Results are cached separately for deep and normal runs. A deep result is reused only while the parent items and documents are the same: a different upload means a new analysis.
+
+API: `POST /api/story-analyzer/analyze/deep` (multipart form) takes:
+- `work_item_id`, `refresh`, `use_cache`, `include_parents`, `include_attachments`;
+- one `files` part per upload.
+
+It returns `400` for an unsupported file type, more than 5 files, or a file over 10 MB.
 
 ---
 
@@ -142,7 +181,7 @@ It answers in a fixed JSON format: section scores and findings, comment insights
 
 No new token scope is needed: **Work Items: Read** covers all of it.
 
-**Demo:** `scripts/seed_devops.sql` adds text, attachments and comments to stories 1011, 1013, 1009 and 1001:
+**Demo:** story 1011 has a parent Feature #1100, whose rules the story partly misses, and an Epic #1200, for trying the deep analysis. `scripts/seed_devops.sql` also adds text, attachments and comments to stories 1011, 1013, 1009 and 1001:
 - 1011: a good story;
 - 1013: vague, with an open question;
 - 1009: no failure scenarios and no evidence;
@@ -168,6 +207,7 @@ The page shows "reused (nothing changed since)". Tick **Re-run even if nothing c
 | GET | `/api/story-analyzer/stories?search=` | Stories for the picker (most recently changed first), with `last_analyzed` |
 | GET | `/api/story-analyzer/instructions` | `{path, exists, used, text}` of the instructions file |
 | POST | `/api/story-analyzer/analyze` | Body `{"work_item_id": 1234, "refresh": true, "use_cache": true}` |
+| POST | `/api/story-analyzer/analyze/deep` | Deep analysis, multipart form: `work_item_id`, `refresh`, `use_cache`, `include_parents`, `include_attachments`, and `files` (repeat per document) |
 
 The analyze response contains:
 - `health`, `sections` (description, acceptance_criteria, evidence, comments), `comments_insights`;
@@ -191,4 +231,7 @@ It returns `404` when the story isn't stored and can't be loaded from Azure DevO
 | Comments missing | Comments are loaded when analyzing with **Load the latest from Azure DevOps** ticked |
 | Timeline says "No state history yet" | Run **Sync Azure DevOps** (it downloads each story's history) |
 | The page says no team instructions are used | `prompts/story-analysis.md` is missing or only has comments; check `STORY_ANALYSIS_INSTRUCTIONS` |
+| A document shows "Azure DevOps is not configured, so attachments cannot be downloaded" | Attachments are downloaded with `AZURE_DEVOPS_PAT`; configure Azure DevOps (README 7.2), or upload the document instead |
+| A document shows "no text found" | A scanned PDF without a text layer, or an empty file: use a PDF with selectable text, or a `.docx` |
+| "The story has no parent work item (Feature) to include" | The story has no parent link in Azure Boards. Add it under **Related Work → Parent** |
 | The result doesn't change after editing the story | Keep **Load the latest from Azure DevOps** ticked; the cache is refreshed when the story changes |

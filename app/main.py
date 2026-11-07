@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, TypeVar
 
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -33,7 +33,9 @@ from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_s
 from app.teams import load_team_config
 from app.time_window import TimeWindow
 from app.lifecycle_config import load_lifecycle_config
+from app.document_text import MAX_DOCUMENT_BYTES, UPLOAD_ACCEPT, is_supported
 from app.story_analyzer import StoryNotFoundError, analyze_story, list_stories, load_instructions
+from app.story_context import MAX_UPLOADS, ContextOptions
 from app.pr_timeline import build_pr_rows, pr_timeline_csv, summarize_prs
 from app.work_item_links import LinkIndex
 from app.story_lifecycle import (
@@ -1099,28 +1101,64 @@ def story_analyzer_instructions():
     return load_instructions()
 
 
-@app.post("/api/story-analyzer/analyze")
-async def story_analyzer_analyze(request: Request, payload: StoryAnalyzeRequest, db: Session = Depends(get_db)):
-    """Analyze one story: health, content quality (LLM), delivery timeline and suggested changes."""
+async def _run_story_analysis(
+    request: Request, db: Session, work_item_id: int, refresh: bool, use_cache: bool, context: ContextOptions | None
+):
     try:
         return await cancel_on_disconnect(
             request,
             analyze_story(
                 db,
-                payload.work_item_id,
+                work_item_id,
                 load_lifecycle_config(),
                 load_team_config(),
                 devops=load_devops_config(),
-                refresh=payload.refresh,
-                use_cache=payload.use_cache,
+                refresh=refresh,
+                use_cache=use_cache,
+                context_options=context,
             ),
         )
     except StoryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except HTTPException as exc:
         if exc.status_code == CLIENT_CLOSED_REQUEST:
-            logger.info("Story analysis of %s cancelled: the client disconnected.", payload.work_item_id)
+            logger.info("Story analysis of %s cancelled: the client disconnected.", work_item_id)
         raise
+
+
+@app.post("/api/story-analyzer/analyze")
+async def story_analyzer_analyze(request: Request, payload: StoryAnalyzeRequest, db: Session = Depends(get_db)):
+    """Analyze one story: health, content quality (LLM), delivery timeline and suggested changes."""
+    return await _run_story_analysis(request, db, payload.work_item_id, payload.refresh, payload.use_cache, None)
+
+
+@app.post("/api/story-analyzer/analyze/deep")
+async def story_analyzer_analyze_deep(
+    request: Request,
+    work_item_id: int = Form(...),
+    refresh: bool = Form(True),
+    use_cache: bool = Form(True),
+    include_parents: bool = Form(True),
+    include_attachments: bool = Form(True),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+):
+    """Deep analysis: also reads the parent Feature/Epic, attachments of the story and its
+    parents, and uploaded documents (multipart ``files``: Word .docx, PDF, text; not stored)."""
+    files = [upload for upload in files if upload.filename]
+    if len(files) > MAX_UPLOADS:
+        raise HTTPException(status_code=400, detail=f"Upload at most {MAX_UPLOADS} documents.")
+    uploads: list[tuple[str, bytes]] = []
+    for upload in files:
+        name = upload.filename or "document"
+        if not is_supported(name):
+            raise HTTPException(status_code=400, detail=f"{name}: only Word (.docx), PDF and text files ({UPLOAD_ACCEPT}) can be uploaded.")
+        data = await upload.read(MAX_DOCUMENT_BYTES + 1)
+        if len(data) > MAX_DOCUMENT_BYTES:
+            raise HTTPException(status_code=400, detail=f"{name} is larger than {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB.")
+        uploads.append((name, data))
+    context = ContextOptions(include_parents=include_parents, include_attachments=include_attachments, uploads=uploads)
+    return await _run_story_analysis(request, db, work_item_id, refresh, use_cache, context)
 
 
 # ---------------------------------------------------------------------------

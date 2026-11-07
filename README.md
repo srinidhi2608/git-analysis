@@ -635,6 +635,8 @@ On the Story analyzer page:
 
 You get the story's **health** (content quality from the LLM, plus delivery health computed from the board history), its tags and suggested tags, a colour-coded **timeline** of its stages, and an analysis of the **description**, **acceptance criteria**, **evidence** (attachments, inline images, linked PRs) and **comments** (key points, unanswered questions). Last comes a list of **suggested changes** to the story, including rewritten Given/When/Then criteria.
 
+Tick **Deep analysis** to also read the story's parent Feature and Epic, the Word, PDF and text attachments on the story and its parents, and documents you upload. A **Context** card then shows what the story misses or contradicts. Uploads are used for that analysis only and not stored.
+
 Your team's rules for a good story live in [`prompts/story-analysis.md`](prompts/story-analysis.md). They're passed to the LLM as instructions; edit the file to match your process. Without an LLM, a rule-based review is shown.
 
 Details: [docs/story-analyzer.md](docs/story-analyzer.md).
@@ -766,6 +768,7 @@ Full interactive documentation: **<http://localhost:8000/docs>**.
 | GET | `/api/devops/report` | Download `?format=csv` or `?format=markdown` for the filtered work items |
 | GET | `/api/pull-requests` | PR timeline rows (phases, stories, work items, flags) and summary; `date_from`/`date_to` (or `days`), `team`, `branches` ([guide](docs/pull-request-timeline.md#6-api-and-csv)) |
 | GET | `/api/reports/pull-requests.csv` | PR timeline CSV |
+| POST | `/api/story-analyzer/analyze/deep` | Deep analysis with parent items, attachments and uploaded documents (multipart) ([guide](docs/story-analyzer.md#3a-deep-analysis-parent-items-attachments-and-your-documents)) |
 | POST | `/api/story-analyzer/analyze` | Analyze one story: `{"work_item_id": 1234, "refresh": true, "use_cache": true}` ([guide](docs/story-analyzer.md#8-api)) |
 | GET | `/api/story-analyzer/stories` | Stories to pick from (`?search=`) |
 | GET | `/api/story-analyzer/instructions` | The team instructions passed to the LLM |
@@ -828,6 +831,8 @@ app/
   pr_timeline.py        Pull request timeline rows, phases, flags, CSV
   story_analyzer.py     Story analyzer: facts, rule-based + LLM review, health, cache
   llm_client.py         JSON chat with the configured LLM (online → Ollama)
+  story_context.py      Deep analysis context: parent Feature/Epic, attachments, uploads
+  document_text.py      Text from Word (.docx), PDF and text documents
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
   github_ingestion.py   GitHub GraphQL client (pagination, batching, rate limits)

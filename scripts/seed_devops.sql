@@ -407,3 +407,24 @@ INSERT INTO azure_work_item_comments (work_item_id, comment_id, author, author_e
   (1011, 2, 'Bob Brown', 'bob@acme.dev', (now() AT TIME ZONE 'UTC') - interval '6 days' + interval '2 hours', '<p>Yes, we call the provider''s delete endpoint. Added it as the 4th criterion.</p>'),
   (1011, 3, 'Tom QA', 'tom@acme.dev', (now() AT TIME ZONE 'UTC') - interval '5 days', '<p>Verified in QAA, report attached. <img src="https://dev.azure.com/acme/x.png"></p>'),
   (1013, 1, 'Tom QA', 'tom@acme.dev', (now() AT TIME ZONE 'UTC') - interval '2 days', '<p>What limit should we use per client, and what status code is returned when it is exceeded?</p>');
+
+-- Parent Feature and Epic of story 1011 (deep analysis in the Story Analyzer).
+-- The Feature asks for things the story does not mention (CVV confirmation,
+-- at most 5 saved cards), so the context review has gaps to report.
+INSERT INTO azure_work_items (id, project, work_item_type, title, state, created_date, changed_date, description, acceptance_criteria, url)
+VALUES
+  (1200, 'Platform', 'Epic', 'Faster checkout 2026', 'Active',
+   (now() AT TIME ZONE 'UTC') - interval '60 days', (now() AT TIME ZONE 'UTC') - interval '10 days',
+   '<p>Reduce checkout time for returning customers by 30% without increasing payment fraud.</p>', NULL,
+   'https://dev.azure.com/acme/Platform/_workitems/edit/1200'),
+  (1100, 'Platform', 'Feature', 'Saved payment methods', 'Active',
+   (now() AT TIME ZONE 'UTC') - interval '30 days', (now() AT TIME ZONE 'UTC') - interval '8 days',
+   '<p>Customers can store cards with the payment provider and reuse them. For PCI compliance, paying with a saved card requires the CVV. A customer can store at most 5 cards; the newest card is the default.</p>',
+   '<ul><li>CVV is required for every payment with a saved card.</li><li>A 6th card cannot be saved; the customer is asked to remove one.</li><li>Saved cards are listed and can be deleted under Payment methods.</li></ul>',
+   'https://dev.azure.com/acme/Platform/_workitems/edit/1100')
+ON CONFLICT (id) DO NOTHING;
+UPDATE azure_work_items SET parent_id = 1200 WHERE id = 1100;
+UPDATE azure_work_items SET parent_id = 1100 WHERE id = 1011;
+INSERT INTO azure_work_item_relations (work_item_id, rel, name, url, target_id) VALUES
+  (1100, 'AttachedFile', 'saved-cards-requirements.docx', 'https://dev.azure.com/acme/Platform/_apis/wit/attachments/demo-4?fileName=saved-cards-requirements.docx', NULL),
+  (1100, 'AttachedFile', 'wireframe.png', 'https://dev.azure.com/acme/Platform/_apis/wit/attachments/demo-5?fileName=wireframe.png', NULL);

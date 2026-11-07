@@ -227,6 +227,32 @@ class AzureDevOpsClient:
         item_project = (raw.get("fields") or {}).get("System.TeamProject") or project or ""
         return {"item": self.normalize_work_item(item_project, raw), "relations": relations}
 
+    def download_attachment(self, url: str, max_bytes: int) -> bytes:
+        """Content of a work item attachment (``AttachedFile`` link URL), up to ``max_bytes``.
+
+        Raises ``AzureDevOpsError`` for credential problems and ``ValueError``
+        when the file is larger than ``max_bytes``.
+        """
+        self.request_count += 1
+        with self._session.get(
+            url, params={"download": "true", "api-version": API_VERSION}, timeout=60, stream=True
+        ) as response:
+            content_type = response.headers.get("Content-Type", "")
+            if response.status_code in (401, 203) or "text/html" in content_type:
+                raise AzureDevOpsError("Azure DevOps rejected the credentials while downloading an attachment (AZURE_DEVOPS_PAT).")
+            if response.status_code == 404:
+                raise AzureDevOpsError("attachment not found")
+            response.raise_for_status()
+            declared = int(response.headers.get("Content-Length") or 0)
+            if declared > max_bytes:
+                raise ValueError(f"larger than {max_bytes // (1024 * 1024)} MB")
+            data = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    raise ValueError(f"larger than {max_bytes // (1024 * 1024)} MB")
+            return bytes(data)
+
     def fetch_comments(self, project: str, work_item_id: int) -> list[dict[str, Any]]:
         """Discussion comments of a work item (Comments API, preview version)."""
         comments: list[dict[str, Any]] = []

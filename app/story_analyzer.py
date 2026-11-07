@@ -15,6 +15,12 @@ The analysis has three parts (see docs/story-analyzer.md):
 
 Health = 60% content quality + 40% delivery health. Results are cached per
 story until the story, its comments or the instructions change.
+
+On request (a checkbox on the page) a **deep analysis** also reads the parent
+Feature/Epic, the attachments of the story and its parents, and documents the
+user uploads, and reports how well the story matches them
+(``app.story_context``). That context review is shown separately and does not
+change the health score.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from app.devops_ingest import replace_comments, upsert_work_item
 from app.lifecycle_config import LifecycleConfig
 from app.llm_client import LLMUnavailableError, chat_json
 from app.models import AzureWorkItem, AzureWorkItemRelation, StoryAnalysis
+from app.story_context import ContextOptions, context_prompt_payload, gather_context
 from app.story_lifecycle import LinkedPr, build_lifecycle, link_pull_requests
 from app.teams import TeamConfig
 from app.time_window import utc_now_naive
@@ -424,6 +431,42 @@ RESPONSE_SCHEMA = {
     "required": ["summary", *SECTIONS, "comments_insights", "suggestions", "suggested_acceptance_criteria", "suggested_tags"],
 }
 
+CONTEXT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "assessment": {"type": "string"},
+        "gaps": {"type": "array", "items": {"type": "string"}},
+        "conflicts": {"type": "array", "items": {"type": "string"}},
+        "sources_used": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["score", "assessment", "gaps", "conflicts", "sources_used"],
+}
+
+
+def response_schema(deep: bool) -> dict[str, Any]:
+    if not deep:
+        return RESPONSE_SCHEMA
+    return {
+        **RESPONSE_SCHEMA,
+        "properties": {**RESPONSE_SCHEMA["properties"], "context": CONTEXT_SCHEMA},
+        "required": [*RESPONSE_SCHEMA["required"], "context"],
+    }
+
+
+DEEP_PROMPT = """
+DEEP ANALYSIS: the input also has "context": the story's parent work items (Feature, Epic) and the
+text of documents attached to the story or its parents, or uploaded by the user. Use them to judge
+whether the story is complete and consistent with what the feature and documents require:
+requirements the story misses, details that contradict them, and acceptance criteria to add.
+Cite the source (e.g. "Feature #12" or the document name) in issues and suggestions.
+Also return:
+ "context": {"score": int,          // 0-100: how well the story covers and agrees with its context
+             "assessment": str,
+             "gaps": [str],          // required by the feature/documents but missing from the story
+             "conflicts": [str],     // where the story disagrees with the feature/documents
+             "sources_used": [str]}  // parents and document names you relied on"""
+
 SYSTEM_PROMPT = """You are an experienced agile coach and QA lead reviewing one Azure Boards user story.
 Judge the quality of the story itself: its description, acceptance criteria, attached evidence and
 discussion. Be specific: quote the story when pointing at a problem, and suggest concrete rewrites.
@@ -443,9 +486,9 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + " …[truncated]"
 
 
-def build_llm_input(facts: dict[str, Any], instructions: dict[str, Any]) -> tuple[str, str]:
+def build_llm_input(facts: dict[str, Any], instructions: dict[str, Any], context: dict[str, Any] | None = None) -> tuple[str, str]:
     row = facts["lifecycle"]
-    system = SYSTEM_PROMPT
+    system = SYSTEM_PROMPT + (DEEP_PROMPT if context is not None else "")
     if instructions["used"]:
         system += "\n\nTEAM INSTRUCTIONS (follow these; they take precedence over general advice):\n" + _clip(instructions["text"], 8000)
     payload = {
@@ -471,6 +514,8 @@ def build_llm_input(facts: dict[str, Any], instructions: dict[str, Any]) -> tupl
             "testers": [p["name"] for p in row["testers"]],
         },
     }
+    if context is not None:
+        payload["context"] = context_prompt_payload(context)
     return system, json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -486,6 +531,55 @@ def _valid_section(value: Any) -> dict[str, Any] | None:
         return None
     strings = lambda key: [str(item) for item in value.get(key) or [] if str(item).strip()]  # noqa: E731
     return {"score": max(0, min(100, score)), "assessment": assessment.strip(), "strengths": strings("strengths"), "issues": strings("issues")}
+
+
+_STOPWORDS = set(
+    "about above after again against because before being below between could during every should their there these "
+    "those through under until where which while would within without other using based users customer customers "
+    "story feature system support allow allows able ensure provide given when then".split()
+)
+
+
+def heuristic_context_review(facts: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Without an LLM: which frequent terms of the feature/documents the story never mentions."""
+    parents, texts = context["parents"], context["texts"]
+    sources = [f"{p['type']} #{p['id']}" for p in parents] + [meta["name"] for meta, _ in texts]
+    if not sources:
+        return {"score": None, "assessment": "No parent feature or readable documents to compare with.", "gaps": [], "conflicts": [], "sources_used": []}
+    corpus = " ".join([p["description"] + " " + p["acceptance_criteria"] for p in parents] + [text for _, text in texts]).lower()
+    story = (facts["story"]["title"] + " " + facts["description"]["text"] + " " + facts["acceptance_criteria"]["text"]).lower()
+    counts: dict[str, int] = {}
+    for word in re.findall(r"[a-z][a-z\-]{5,}", corpus):
+        if word not in _STOPWORDS:
+            counts[word] = counts.get(word, 0) + 1
+    key_terms = [word for word, _ in sorted(counts.items(), key=lambda kv: -kv[1])[:15]]
+    missing = [term for term in key_terms if term not in story]
+    score = round(100 * (len(key_terms) - len(missing)) / len(key_terms)) if key_terms else None
+    gaps = [f"“{term}” appears in the feature/documents but not in the story" for term in missing[:8]]
+    for parent in parents:
+        if not parent["description"]:
+            gaps.append(f"{parent['type']} #{parent['id']} has no description to check the story against.")
+    return {
+        "score": score,
+        "assessment": f"Rule-based comparison: the story mentions {len(key_terms) - len(missing)} of the {len(key_terms)} most frequent terms of its context. An LLM review compares meaning, not words.",
+        "gaps": gaps,
+        "conflicts": [],
+        "sources_used": sources,
+    }
+
+
+def merge_context(llm: dict[str, Any] | None, fallback: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """The LLM's context review if usable, else the rule-based one; returns (review, from_llm)."""
+    value = (llm or {}).get("context")
+    if isinstance(value, dict) and isinstance(value.get("assessment"), str) and value["assessment"].strip():
+        try:
+            score = max(0, min(100, int(round(float(value.get("score"))))))
+        except (TypeError, ValueError):
+            score = fallback["score"]
+        as_list = lambda key: [str(item) for item in value.get(key) or [] if str(item).strip()] if isinstance(value.get(key), list) else []  # noqa: E731
+        return {"score": score, "assessment": value["assessment"].strip(), "gaps": as_list("gaps"),
+                "conflicts": as_list("conflicts"), "sources_used": as_list("sources_used")}, True
+    return fallback, False
 
 
 def merge_reviews(llm: dict[str, Any] | None, fallback: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -534,9 +628,13 @@ def _level(score: int) -> str:
     return "Healthy" if score >= 75 else "Needs attention" if score >= 50 else "At risk"
 
 
-def _input_hash(facts: dict[str, Any], instructions: dict[str, Any]) -> str:
+def _input_hash(facts: dict[str, Any], instructions: dict[str, Any], context: dict[str, Any] | None = None) -> str:
     row = facts["lifecycle"]
     material = {
+        "context": None if context is None else {
+            "parents": context["parents"],
+            "documents": [(d["name"], d["source"], d["used"], d["skipped"], d["sha256"]) for d in context["documents"]],
+        },
         "story": facts["story"], "description": facts["description"], "criteria": facts["acceptance_criteria"],
         "attachments": facts["attachments"], "comments": facts["comments"], "children": facts["children"],
         "flags": row["flags"], "stage": row["stage"], "prs": [(p["number"], p["status"]) for p in row["pull_requests"]],
@@ -554,8 +652,13 @@ async def analyze_story(
     refresh: bool = False,
     use_cache: bool = True,
     now: datetime | None = None,
+    context_options: ContextOptions | None = None,
 ) -> dict[str, Any]:
-    """Analyze one story; ``refresh`` reloads it (and its comments) from Azure DevOps first."""
+    """Analyze one story; ``refresh`` reloads it (and its comments) from Azure DevOps first.
+
+    ``context_options`` turns on the deep analysis: parent Feature/Epic,
+    attachments of the story and its parents, and uploaded documents.
+    """
     now = now or utc_now_naive()
     warnings: list[str] = []
     item = db.get(AzureWorkItem, work_item_id)
@@ -578,7 +681,11 @@ async def analyze_story(
     instructions = load_instructions()
     if not instructions["used"]:
         warnings.append(f"No team instructions in {instructions['path']}: using the general review only.")
-    input_hash = _input_hash(facts, instructions)
+    context = None
+    if context_options is not None:
+        context = await gather_context(db, item, devops, context_options, html_to_text)
+        warnings.extend(context["warnings"])
+    input_hash = _input_hash(facts, instructions, context)
     if use_cache:
         cached = (
             db.query(StoryAnalysis)
@@ -595,8 +702,8 @@ async def analyze_story(
     fallback = heuristic_review(facts, testing)
     llm_answer, provider, llm_error = None, "Rule-based (no LLM)", None
     try:
-        system, user = build_llm_input(facts, instructions)
-        llm_answer, provider = await chat_json(system, user, RESPONSE_SCHEMA)
+        system, user = build_llm_input(facts, instructions, context)
+        llm_answer, provider = await chat_json(system, user, response_schema(context is not None))
     except LLMUnavailableError as exc:
         llm_error = str(exc)
         warnings.append("No LLM available, so this is the rule-based review: " + llm_error)
@@ -604,6 +711,11 @@ async def analyze_story(
         llm_error = str(exc)
         warnings.append(f"The LLM reply could not be used ({exc}); showing the rule-based review.")
     review, filled = merge_reviews(llm_answer, fallback)
+    context_review = None
+    if context is not None:
+        context_review, from_llm = merge_context(llm_answer, heuristic_context_review(facts, context))
+        if llm_answer is not None and not from_llm:
+            filled.append("context")
     if llm_answer is not None and filled:
         provider += " + rule-based for " + ", ".join(name.replace("_", " ") for name in filled)
 
@@ -647,6 +759,16 @@ async def analyze_story(
             "inline_images": facts["description"]["images"] + facts["acceptance_criteria"]["images"],
             "comments": facts["comments"],
             "children": facts["children"],
+        },
+        # Deep analysis only: what was read and how well the story matches it.
+        "context": None if context is None else {
+            "parents": [
+                {key: parent[key] for key in ("id", "type", "title", "state", "url", "attachments")}
+                | {"description": _clip(parent["description"], 1500)}
+                for parent in context["parents"]
+            ],
+            "documents": [{key: d[key] for key in ("name", "source", "used", "skipped", "characters")} for d in context["documents"]],
+            "review": context_review,
         },
     }
     db.add(StoryAnalysis(work_item_id=item.id, input_hash=input_hash, provider=provider, created_at=now, result=json.dumps(result, default=str)))
