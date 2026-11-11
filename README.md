@@ -22,7 +22,7 @@ It pulls PRs, reviews, review comments and commits for the repositories you choo
 1. [How it works](#1-how-it-works)
 2. [Quick start with Docker Compose (recommended)](#2-quick-start-with-docker-compose-recommended)
 3. [Configuration](#3-configuration)
-4. [Getting data into the dashboard](#4-getting-data-into-the-dashboard)
+4. [Getting data into the dashboard](#4-getting-data-into-the-dashboard) (including [sharing a page as HTML](#47-share-a-page-export-html))
 5. [Running the API and UI separately (without Docker)](#5-running-the-api-and-ui-separately-without-docker)
 6. [AI analysis (optional)](#6-ai-analysis-optional)
 7. [DevOps Integration (Azure DevOps)](#7-devops-integration-azure-devops)
@@ -332,6 +332,20 @@ The **date range** picker in the header replaces the old "Lookback days" field. 
 API: `date_from` / `date_to` take an ISO date (`2026-10-01`, a whole day) or a date-time (`2026-10-01T09:30:00Z`, or with an offset such as `+05:30`; no offset means UTC). See section 9.
 
 ---
+
+### 4.7 Share a page: Export HTML
+
+Every page has an **⤓ Export HTML** button: Team Overview, Individual Performance, DevOps Integration, Story Quality (in the dashboard header) and each Story analyzer result. It saves what the page currently shows as **one self-contained `.html` file**. Anyone can open it in a browser, offline, without the app, an account or a server.
+
+| The file contains | The file does not contain |
+|---|---|
+| What is on screen: numbers, charts (as images), tables and any rows you expanded | Scripts, API calls or links back to the app |
+| The page's styling, so it looks the same | The data behind the page: no records beyond the rows shown, no tokens, no settings |
+| A banner with the page name, export time and the filters in use (date range, team, target branches, developer) | Actions: Sync, Refresh, snapshots, CSV downloads, the Story analyzer form |
+
+Filters and inputs appear as plain text showing the value in use.
+
+**What you see is what you export.** Collapsed details and grid rows hidden by a filter or not yet loaded (beyond *Show more*) are not included, so set filters and expand rows first. Hover tooltips aren't kept.
 
 ## 5) Running the API and UI separately (without Docker)
 
@@ -844,7 +858,8 @@ app/
   ai_analyzers.py       Online LLM → Ollama → rule-based analyzer
 frontend/               React + Vite UI: src/App.tsx (left panel + pages); src/components: GitAnalyticsDashboard,
                         StoryAnalyzerPage, DevOpsIntegrationPage, StoryQualityPage, PullRequestTimeline, DataGrid,
-                        DateTimeRangePicker + dateRange.ts, BranchSelect, stageColors.ts
+                        DateTimeRangePicker + dateRange.ts, BranchSelect, stageColors.ts, ExportHtmlButton;
+                        src/exportHtml.ts (static HTML export of a page)
 docs/                   story-lifecycle.md (Story Quality), pull-request-timeline.md (PR timeline, links, grids),
                         story-analyzer.md (Story analyzer)
 prompts/                story-analysis.md (team instructions for the Story analyzer)

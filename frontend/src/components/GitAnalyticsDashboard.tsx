@@ -17,7 +17,8 @@ import DevOpsIntegrationPage from "./DevOpsIntegrationPage";
 import StoryQualityPage from "./StoryQualityPage";
 import PullRequestTimeline from "./PullRequestTimeline";
 import DateTimeRangePicker from "./DateTimeRangePicker";
-import { type DateRange, defaultRange, rangeShortLabel, rangeToApi, readStoredRange, storeRange } from "./dateRange";
+import { type DateRange, defaultRange, rangeLabel, rangeShortLabel, rangeToApi, readStoredRange, storeRange } from "./dateRange";
+import ExportHtmlButton from "./ExportHtmlButton";
 
 const BRANCH_STORAGE_KEY = "git-analysis.target-branches";
 const RANGE_STORAGE_KEY = "git-analysis.date-range";
@@ -1033,6 +1034,8 @@ export default function GitAnalyticsDashboard() {
 
   // In-flight requests; starting a new load aborts the previous one so slow
   // responses (e.g. the LLM-backed analytics) never overwrite newer selections.
+  // The whole page, for "Export HTML".
+  const pageRef = useRef<HTMLDivElement | null>(null);
   const teamAbortRef = useRef<AbortController | null>(null);
   const quickAbortRef = useRef<AbortController | null>(null);
   const analyticsAbortRef = useRef<AbortController | null>(null);
@@ -1337,6 +1340,25 @@ export default function GitAnalyticsDashboard() {
 
   const latestSnapshot = snapshotInfo?.snapshots[0] ?? null;
 
+  /** Page name and filters written into an exported HTML file. */
+  const exportInfo = () => {
+    const tabNames: Record<TabKey, string> = {
+      team: "Team Overview",
+      individual: "Individual Performance",
+      devops: "DevOps Integration",
+      stories: "Story Quality",
+    };
+    return {
+      page: tabNames[activeTab],
+      details: [
+        `Date range: ${rangeLabel(dateRange)}`,
+        activeTab !== "devops" && activeTab !== "stories" ? `Team: ${selectedTeam || "All teams"}` : "",
+        selectedBranches.length ? `Target branches: ${selectedBranches.join(", ")}` : "",
+        activeTab === "individual" && selectedDeveloper ? `Developer: ${selectedDeveloperName}` : "",
+      ],
+    };
+  };
+
   const isTeamView = activeTab === "team";
 
   const avgCycleMin =
@@ -1388,7 +1410,7 @@ export default function GitAnalyticsDashboard() {
   const chartsLoading = isTeamView ? teamLoading : indivDataLoading;
 
   return (
-    <div className="min-h-screen bg-slate-950 p-6 text-slate-100 md:p-8">
+    <div className="min-h-screen bg-slate-950 p-6 text-slate-100 md:p-8" ref={pageRef}>
       <div className="mx-auto max-w-7xl space-y-6">
         <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl shadow-black/20">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -1400,6 +1422,7 @@ export default function GitAnalyticsDashboard() {
               <DateTimeRangePicker label="Date range" onChange={handleRangeChange} value={dateRange} />
               <button
                 className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                data-export="exclude"
                 disabled={syncing}
                 onClick={handleSync}
                 type="button"
@@ -1408,12 +1431,14 @@ export default function GitAnalyticsDashboard() {
               </button>
               <button
                 className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-600 disabled:opacity-50"
+                data-export="exclude"
                 disabled={loading}
                 onClick={() => refreshData()}
                 type="button"
               >
                 {loading ? "Loading…" : "↺ Refresh"}
               </button>
+              <ExportHtmlButton info={exportInfo} target={() => pageRef.current} />
               <div className="inline-flex rounded-xl border border-slate-700 bg-slate-800 p-1">
                 <button
                   className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
@@ -1455,7 +1480,7 @@ export default function GitAnalyticsDashboard() {
             </div>
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-slate-800 pt-4 text-sm text-slate-400">
+          <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-slate-800 pt-4 text-sm text-slate-400" data-export="exclude">
             <label className="flex items-center gap-2" title="Re-download every PR in the date range, even unchanged ones">
               <input
                 checked={fullRefresh}
@@ -1491,7 +1516,7 @@ export default function GitAnalyticsDashboard() {
           </div>
 
           {syncMessage && (
-            <p className="mt-3 rounded-lg bg-emerald-900/40 px-4 py-2 text-sm text-emerald-300">{syncMessage}</p>
+            <p className="mt-3 rounded-lg bg-emerald-900/40 px-4 py-2 text-sm text-emerald-300" data-export="exclude">{syncMessage}</p>
           )}
           {error && <p className="mt-3 rounded-lg bg-red-900/40 px-4 py-2 text-sm text-red-300">{error}</p>}
         </div>

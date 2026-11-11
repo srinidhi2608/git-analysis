@@ -34,6 +34,8 @@ The review is done by your configured LLM, following your team's instructions in
    - **Story number:** type any work item number (`12345`, `#12345` or `AB#12345`). It doesn't need to be synced yet: with Azure DevOps configured, it is loaded on demand.
 3. Click **Analyze**. An LLM review can take up to a minute; **Cancel** stops it, and the server stops the LLM call too.
 
+To share a result, click **⤓ Export HTML** above it. You get a static, self-contained page with the analysis as shown, without the picker or the underlying data (see README [4.7](../README.md#47-share-a-page-export-html)).
+
 Options:
 - **Load the latest from Azure DevOps** (on by default) reloads the story's fields, links, attachments and comments before analyzing.
 - **Re-run even if nothing changed** asks the LLM again instead of reusing the last result (see [Caching](#7-caching)).

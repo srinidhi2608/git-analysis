@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import ExportHtmlButton from "./ExportHtmlButton";
 import { KIND_COLORS, stageColorMap, type StageKind } from "./stageColors";
 
 // ---------------------------------------------------------------------------
@@ -208,6 +209,8 @@ export default function StoryAnalyzerPage() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  // The page, for "Export HTML" (the picker and form are left out of the export).
+  const pageRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     fetch("/api/story-analyzer/instructions")
@@ -296,7 +299,8 @@ export default function StoryAnalyzerPage() {
   const validNumber = Number.isInteger(parsedNumber) && parsedNumber > 0;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-6 md:p-8">
+    <div className="mx-auto max-w-7xl space-y-6 p-6 md:p-8" ref={pageRef}>
+      <div data-export="exclude">
       <Card>
         <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">Azure Boards + GitHub + LLM</p>
         <h1 className="mt-2 text-2xl font-semibold text-white">Story analyzer</h1>
@@ -472,6 +476,7 @@ export default function StoryAnalyzerPage() {
           </pre>
         )}
       </Card>
+      </div>
 
       {running && (
         <Card>
@@ -481,7 +486,23 @@ export default function StoryAnalyzerPage() {
         </Card>
       )}
       {error && <p className="rounded-lg bg-red-900/40 px-4 py-3 text-sm text-red-300">{error}</p>}
-      {analysis && <AnalysisView analysis={analysis} />}
+      {analysis && (
+        <>
+          <div className="flex justify-end" data-export="exclude">
+            <ExportHtmlButton
+              info={() => ({
+                page: `Story analysis #${analysis.story.id}: ${analysis.story.title}`,
+                details: [
+                  `Analyzed ${new Date(analysis.analyzed_at).toLocaleString()} by ${analysis.provider}`,
+                  analysis.context ? "Deep analysis (parent items and documents)" : "",
+                ],
+              })}
+              target={() => pageRef.current}
+            />
+          </div>
+          <AnalysisView analysis={analysis} />
+        </>
+      )}
     </div>
   );
 }
