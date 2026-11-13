@@ -41,6 +41,10 @@ MIN_DOCUMENT_CHARS = 2_000
 class ContextOptions:
     include_parents: bool = True
     include_attachments: bool = True
+    # Check the code of the linked GitHub PRs against the acceptance criteria.
+    include_code: bool = False
+    # Check the linked TestRail test cases, results and evidence against the acceptance criteria.
+    include_tests: bool = False
     # (file name, content) of documents uploaded by the user.
     uploads: list[tuple[str, bytes]] = field(default_factory=list)
 

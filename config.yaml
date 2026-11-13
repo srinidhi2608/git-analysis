@@ -57,3 +57,16 @@ repositories:
 #   release_tag_pattern: '(?i)^release\s*v?(\d+(?:\.\d+){0,2})$'   # "Release 2026.10.1"
 #   testing:
 #     enabled: false            # placeholder until test results/coverage are integrated
+
+# Optional: TestRail, for the Story analyzer's test check (deep analysis).
+# Test cases are found by their References field (the story id, written as
+# reference_format) and by TestRail links / C123 mentions on the story.
+# The API key goes in .env as TESTRAIL_API_KEY. See docs/story-analyzer.md (3c).
+#
+# testrail:
+#   url: "https://yourcompany.testrail.io"
+#   user: "qa-bot@yourcompany.com"
+#   project_ids: [1]
+#   suite_ids: []              # needed only for projects with several suites
+#   reference_format: "{id}"   # e.g. "AB#{id}" if References hold AB#1234
+#   runs_to_scan: 10           # recent runs searched for the latest results

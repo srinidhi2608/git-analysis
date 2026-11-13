@@ -7,7 +7,10 @@ You get:
 - its **tags**, with suggested ones;
 - a colour-coded **timeline** of its stages;
 - an analysis of its **description**, **acceptance criteria**, attached **evidence** and **comments**;
-- a list of **suggested changes** to the story.
+- a list of **suggested changes** to the story;
+- optionally (deep analysis), a check of the **code in the linked GitHub pull requests** and of the **TestRail test cases and their evidence** against the acceptance criteria.
+
+The page has a second mode, **Create stories**, where the LLM splits a requirement into several suggested user stories (section 3d).
 
 The review is done by your configured LLM, following your team's instructions in [`prompts/story-analysis.md`](../prompts/story-analysis.md).
 
@@ -17,6 +20,9 @@ The review is done by your configured LLM, following your team's instructions in
 2. [What it shows](#2-what-it-shows)
 3. [How health is calculated](#3-how-health-is-calculated)
    - [3a) Deep analysis: parent items, attachments and your documents](#3a-deep-analysis-parent-items-attachments-and-your-documents)
+   - [3b) Code check: linked GitHub pull requests](#3b-code-check-linked-github-pull-requests)
+   - [3c) Test check: TestRail test cases and evidence](#3c-test-check-testrail-test-cases-and-evidence)
+   - [3d) Create stories: split a requirement](#3d-create-stories-split-a-requirement)
 4. [Team instructions (`prompts/story-analysis.md`)](#4-team-instructions-promptsstory-analysismd)
 5. [LLM and fallback](#5-llm-and-fallback)
 6. [Data it reads](#6-data-it-reads)
@@ -128,6 +134,83 @@ API: `POST /api/story-analyzer/analyze/deep` (multipart form) takes:
 
 It returns `400` for an unsupported file type, more than 5 files, or a file over 10 MB.
 
+## 3b) Code check: linked GitHub pull requests
+
+Under **Deep analysis**, tick **Code in the linked pull requests**. The analyzer then:
+
+1. Takes the pull requests linked to the story (the same ones listed under Evidence: Azure Boards links and `AB#1234` mentions in PR titles, bodies and branches). Merged PRs come first; at most **5** are read.
+2. Downloads each PR's changed files and diffs from GitHub (`GET /repos/{owner}/{repo}/pulls/{n}/files`) with your `GITHUB_TOKEN`.
+3. Sends the diffs to the LLM, which decides for **each acceptance criterion** whether the code implements it: **implemented**, **partial**, **not found** or **unclear** (for example, when the relevant code is not in the diff), with evidence (file and what the change does).
+
+The **Implementation** card shows:
+- a score and an assessment;
+- each criterion with its status and evidence;
+- **Missing tests**: criteria with no test changes;
+- **Changes unrelated to the story**;
+- each PR with its files (test files marked) and how many files were skipped.
+
+Limits and what is skipped:
+- Lock files, generated, minified and binary files, and files GitHub shows without a diff are skipped (listed as a count).
+- About 40,000 characters of diff go to the LLM, at most 4,000 per file. Non-test files come first, then tests. Files over the budget are named but their diff is left out.
+- The diff shows the **change**, not the whole program: code that already existed is not seen, so a criterion may be **unclear** rather than wrong.
+
+Configuration: nothing new. It uses `GITHUB_TOKEN` (needs read access to the repositories' contents and pull requests). For GitHub Enterprise Server set `GITHUB_API_URL` (e.g. `https://github.example.com/api/v3`).
+
+Without an LLM, a rule-based fallback matches the key words of each criterion against the added code lines and file names. It's labelled as such and can't judge meaning.
+
+## 3c) Test check: TestRail test cases and evidence
+
+Under **Deep analysis**, tick **TestRail test cases and evidence**. The analyzer finds the story's test cases in TestRail:
+
+- cases whose **References** field contains the story id (this is what TestRail's Azure DevOps integration fills in), found with `get_cases?refs=` (TestRail 6.5.2 or newer);
+- cases linked on the story itself: TestRail case links (`…/index.php?/cases/view/123`) or mentions like `C123` in the description, acceptance criteria or comments.
+
+For each case (at most 30) it reads the title, preconditions, steps and expected results, the names of attachments on the case, and the **latest result** in the most recent test runs: status, comment, defects and the names of the attachments on that result (the evidence). The LLM then decides for **each acceptance criterion** whether the tests cover it (**covered**, **partial**, **not covered**, naming the cases), lists cases that match no criterion, and **evidence problems**: failed, blocked or untested cases, passes without evidence, or evidence that does not show the expected result.
+
+The LLM sees attachment **names**, not their content (screenshots are not opened).
+
+### Configure TestRail
+
+1. In TestRail, create (or choose) a user that can read the projects. Under **My Settings → API Keys** create an API key. An administrator must enable the API once under **Administration → Site Settings → API**.
+2. Put the key in `.env`:
+   ```
+   TESTRAIL_API_KEY=your-api-key
+   ```
+3. Add a `testrail:` section to `config.yaml`:
+   ```yaml
+   testrail:
+     url: "https://yourcompany.testrail.io"
+     user: "qa-bot@yourcompany.com"     # the user the API key belongs to
+     project_ids: [1]                   # TestRail project ids (the number in index.php?/projects/overview/1)
+     suite_ids: []                      # needed only for projects with several suites
+     reference_format: "{id}"           # how the story appears in References, e.g. "AB#{id}"
+     runs_to_scan: 10                   # recent runs searched for the latest results
+   ```
+4. Restart the backend. The page shows a hint next to the checkbox while something is missing.
+
+`reference_format` must match what your team writes in **References**: with TestRail's Azure DevOps integration it is usually the plain id (`1234`). Matching is exact per reference, so `1234` does not match `12345`.
+
+Without an LLM, a rule-based fallback matches criterion key words against the case titles and steps, and still lists the evidence problems (no result, failed, passed without evidence).
+
+## 3d) Create stories: split a requirement
+
+Switch the page to **Create stories** (top of the page). Then:
+
+1. Paste the requirement, and/or upload documents (same formats and limits as deep analysis), and/or give the parent **Feature** number (its description, acceptance criteria and attachments are read).
+2. Choose the maximum number of stories (3–15).
+3. Click **Split into stories**.
+
+The LLM splits the requirement into **vertical slices** following INVEST and your team's rules. For each story you get a title, an "As a …, I want … so that …" description, Given/When/Then acceptance criteria (including a failure case), story points, tags, dependencies on other suggested stories and notes. You also get **open questions** to answer before refinement and the **assumptions** the LLM made.
+
+What to do with them:
+- **Remove** any story you don't want (left out of the exports; **Restore** brings them back).
+- **CSV for Azure Boards**: in Azure Boards, **Boards → Work items → Import Work Items**, choose the file, and check the preview before saving. Columns: Work Item Type, Title, Description, Acceptance Criteria, Story Points, Tags. Set the parent link (Feature) in Azure Boards afterwards.
+- **Copy Markdown** to paste into a wiki, chat or email; **Export HTML** for a standalone page.
+
+**Nothing is written to Azure DevOps** by the app.
+
+The splitting rules live in [`prompts/story-splitting.md`](../prompts/story-splitting.md) (another file can be set with `STORY_SPLITTING_INSTRUCTIONS`). They're sent together with `prompts/story-analysis.md`, so the suggested stories follow the same rules the analyzer checks. Without an LLM, the requirement is split by headings, then top-level bullets, then paragraphs, and the page says so.
+
 ---
 
 ## 4) Team instructions (`prompts/story-analysis.md`)
@@ -209,14 +292,17 @@ The page shows "reused (nothing changed since)". Tick **Re-run even if nothing c
 | GET | `/api/story-analyzer/stories?search=` | Stories for the picker (most recently changed first), with `last_analyzed` |
 | GET | `/api/story-analyzer/instructions` | `{path, exists, used, text}` of the instructions file |
 | POST | `/api/story-analyzer/analyze` | Body `{"work_item_id": 1234, "refresh": true, "use_cache": true}` |
-| POST | `/api/story-analyzer/analyze/deep` | Deep analysis, multipart form: `work_item_id`, `refresh`, `use_cache`, `include_parents`, `include_attachments`, and `files` (repeat per document) |
+| POST | `/api/story-analyzer/analyze/deep` | Deep analysis, multipart form: `work_item_id`, `refresh`, `use_cache`, `include_parents`, `include_attachments`, `include_code`, `include_tests`, and `files` (repeat per document) |
+| POST | `/api/story-analyzer/split` | Create stories, multipart form: `requirement`, `parent_id` (optional), `max_stories` (1–15, default 8), `files`. Returns `summary`, `stories`, `open_questions`, `assumptions`, `parent`, `documents`, `provider`, `warnings` |
+| GET | `/api/story-analyzer/integrations` | Which integrations are configured (Azure DevOps, GitHub token, TestRail) and what is missing; no secrets |
 
 The analyze response contains:
 - `health`, `sections` (description, acceptance_criteria, evidence, comments), `comments_insights`;
 - `delivery`, `suggestions`, `suggested_acceptance_criteria`, `suggested_tags`;
 - `lifecycle` (timeline, stage hours, flags, PRs), `stages`;
 - `inputs` (the text, attachments and comments that were analyzed);
-- `provider`, `cached`, `warnings`.
+- `provider`, `cached`, `warnings`;
+- with a deep analysis: `context`, and `implementation` (`pull_requests`, `review`) and `test_coverage` (`configured`, `missing`, `errors`, `cases`, `review`) when those checks were ticked.
 
 It returns `404` when the story isn't stored and can't be loaded from Azure DevOps.
 
@@ -236,4 +322,12 @@ It returns `404` when the story isn't stored and can't be loaded from Azure DevO
 | A document shows "Azure DevOps is not configured, so attachments cannot be downloaded" | Attachments are downloaded with `AZURE_DEVOPS_PAT`; configure Azure DevOps (README 7.2), or upload the document instead |
 | A document shows "no text found" | A scanned PDF without a text layer, or an empty file: use a PDF with selectable text, or a `.docx` |
 | "The story has no parent work item (Feature) to include" | The story has no parent link in Azure Boards. Add it under **Related Work → Parent** |
+| Implementation card: "GitHub refused access (401/403)" | The `GITHUB_TOKEN` can't read that repository; give it read access to contents and pull requests |
+| Implementation card: "pull request not found" | The PR was deleted, or it's in a repository the token can't see |
+| "The story has no linked pull requests" | Link the PR in Azure Boards (**Development → Add link**) or put `AB#1234` in the PR title or body, then sync |
+| "TestRail is not configured" | Add the `testrail:` section to `config.yaml` and `TESTRAIL_API_KEY` to `.env` (section 3c), then restart |
+| "TestRail rejected the credentials" | `testrail.user` must be the user that owns `TESTRAIL_API_KEY`, and the API must be enabled in TestRail |
+| No test cases found although they exist | Check the cases' **References** contain the story id in the form of `reference_format`; for projects with several suites set `suite_ids` |
+| Test cases have no latest result | They're not in the last `runs_to_scan` runs; raise the number |
+| Create stories gives a single story per heading or paragraph | No LLM was available, so the rule-based split was used |
 | The result doesn't change after editing the story | Keep **Load the latest from Azure DevOps** ticked; the cache is refreshed when the story changes |

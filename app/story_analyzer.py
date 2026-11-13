@@ -43,7 +43,17 @@ from app.devops_ingest import replace_comments, upsert_work_item
 from app.lifecycle_config import LifecycleConfig
 from app.llm_client import LLMUnavailableError, chat_json
 from app.models import AzureWorkItem, AzureWorkItemRelation, StoryAnalysis
+from app.pr_code import MAX_PULL_REQUESTS, fetch_pr_changes, summarize_changes
+from app.story_checks import (
+    extend_prompt,
+    extend_schema,
+    heuristic_implementation,
+    heuristic_test_coverage,
+    merge_implementation,
+    merge_test_coverage,
+)
 from app.story_context import ContextOptions, context_prompt_payload, gather_context
+from app.testrail import gather_test_cases, load_testrail_config
 from app.story_lifecycle import LinkedPr, build_lifecycle, link_pull_requests
 from app.teams import TeamConfig
 from app.time_window import utc_now_naive
@@ -444,14 +454,15 @@ CONTEXT_SCHEMA = {
 }
 
 
-def response_schema(deep: bool) -> dict[str, Any]:
-    if not deep:
-        return RESPONSE_SCHEMA
-    return {
-        **RESPONSE_SCHEMA,
-        "properties": {**RESPONSE_SCHEMA["properties"], "context": CONTEXT_SCHEMA},
-        "required": [*RESPONSE_SCHEMA["required"], "context"],
-    }
+def response_schema(deep: bool, code: bool = False, tests: bool = False) -> dict[str, Any]:
+    schema = RESPONSE_SCHEMA
+    if deep:
+        schema = {
+            **RESPONSE_SCHEMA,
+            "properties": {**RESPONSE_SCHEMA["properties"], "context": CONTEXT_SCHEMA},
+            "required": [*RESPONSE_SCHEMA["required"], "context"],
+        }
+    return extend_schema(schema, code, tests)
 
 
 DEEP_PROMPT = """
@@ -486,7 +497,13 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + " …[truncated]"
 
 
-def build_llm_input(facts: dict[str, Any], instructions: dict[str, Any], context: dict[str, Any] | None = None) -> tuple[str, str]:
+def build_llm_input(
+    facts: dict[str, Any],
+    instructions: dict[str, Any],
+    context: dict[str, Any] | None = None,
+    code: list[dict[str, Any]] | None = None,
+    tests: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     row = facts["lifecycle"]
     system = SYSTEM_PROMPT + (DEEP_PROMPT if context is not None else "")
     if instructions["used"]:
@@ -516,6 +533,7 @@ def build_llm_input(facts: dict[str, Any], instructions: dict[str, Any], context
     }
     if context is not None:
         payload["context"] = context_prompt_payload(context)
+    system = extend_prompt(system, payload, code, tests)
     return system, json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -624,13 +642,34 @@ def merge_reviews(llm: dict[str, Any] | None, fallback: dict[str, Any]) -> tuple
 # ---------------------------------------------------------------------------
 
 
+def gather_code(facts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Code changes of the story's linked PRs (merged first, at most ``MAX_PULL_REQUESTS``)."""
+    prs = sorted(facts["lifecycle"]["pull_requests"], key=lambda pr: (pr["status"] != "merged", pr["status"] != "open"))
+    changes = []
+    for pr in prs[:MAX_PULL_REQUESTS]:
+        change = fetch_pr_changes(pr["repository"], pr["number"])
+        changes.append({**change, "title": pr["title"], "status": pr["status"]})
+    return changes
+
+
 def _level(score: int) -> str:
     return "Healthy" if score >= 75 else "Needs attention" if score >= 50 else "At risk"
 
 
-def _input_hash(facts: dict[str, Any], instructions: dict[str, Any], context: dict[str, Any] | None = None) -> str:
+def _input_hash(
+    facts: dict[str, Any],
+    instructions: dict[str, Any],
+    context: dict[str, Any] | None = None,
+    code: list[dict[str, Any]] | None = None,
+    tests: dict[str, Any] | None = None,
+) -> str:
     row = facts["lifecycle"]
     material = {
+        "code": None if code is None else [
+            (c["repository"], c["number"], c["error"], [(f["filename"], hashlib.sha256(f["patch"].encode()).hexdigest()) for f in c["files"]])
+            for c in code
+        ],
+        "tests": None if tests is None else [tests.get("configured"), tests.get("cases")],
         "context": None if context is None else {
             "parents": context["parents"],
             "documents": [(d["name"], d["source"], d["used"], d["skipped"], d["sha256"]) for d in context["documents"]],
@@ -681,11 +720,25 @@ async def analyze_story(
     instructions = load_instructions()
     if not instructions["used"]:
         warnings.append(f"No team instructions in {instructions['path']}: using the general review only.")
-    context = None
+    context = code = tests = None
     if context_options is not None:
         context = await gather_context(db, item, devops, context_options, html_to_text)
         warnings.extend(context["warnings"])
-    input_hash = _input_hash(facts, instructions, context)
+        if context_options.include_code:
+            code = await asyncio.to_thread(gather_code, facts)
+            if not code:
+                warnings.append("The story has no linked pull requests, so its code could not be checked.")
+            warnings.extend(f"{c['repository']}#{c['number']}: {c['error']}" for c in code if c["error"])
+        if context_options.include_tests:
+            texts = [item.description or "", item.acceptance_criteria or "", *(c["text"] for c in facts["comments"]),
+                     *facts["hyperlinks"], *(a["url"] for a in facts["attachments"])]
+            tests = await asyncio.to_thread(gather_test_cases, load_testrail_config(), item.id, texts)
+            if not tests["configured"]:
+                warnings.append("TestRail is not configured, so test cases could not be checked: missing " + ", ".join(tests["missing"]) + ".")
+            elif not tests["cases"]:
+                warnings.append(f"No TestRail test cases reference story {item.id}.")
+            warnings.extend(f"TestRail: {error}" for error in tests["errors"])
+    input_hash = _input_hash(facts, instructions, context, code, tests)
     if use_cache:
         cached = (
             db.query(StoryAnalysis)
@@ -702,8 +755,8 @@ async def analyze_story(
     fallback = heuristic_review(facts, testing)
     llm_answer, provider, llm_error = None, "Rule-based (no LLM)", None
     try:
-        system, user = build_llm_input(facts, instructions, context)
-        llm_answer, provider = await chat_json(system, user, response_schema(context is not None))
+        system, user = build_llm_input(facts, instructions, context, code, tests)
+        llm_answer, provider = await chat_json(system, user, response_schema(context is not None, code is not None, tests is not None))
     except LLMUnavailableError as exc:
         llm_error = str(exc)
         warnings.append("No LLM available, so this is the rule-based review: " + llm_error)
@@ -716,6 +769,16 @@ async def analyze_story(
         context_review, from_llm = merge_context(llm_answer, heuristic_context_review(facts, context))
         if llm_answer is not None and not from_llm:
             filled.append("context")
+    criteria_text = facts["acceptance_criteria"]["text"]
+    implementation_review = test_review = None
+    if code is not None:
+        implementation_review, from_llm = merge_implementation(llm_answer, heuristic_implementation(criteria_text, code))
+        if llm_answer is not None and not from_llm:
+            filled.append("implementation")
+    if tests is not None and tests["configured"]:
+        test_review, from_llm = merge_test_coverage(llm_answer, heuristic_test_coverage(criteria_text, tests))
+        if llm_answer is not None and not from_llm:
+            filled.append("test coverage")
     if llm_answer is not None and filled:
         provider += " + rule-based for " + ", ".join(name.replace("_", " ") for name in filled)
 
@@ -769,6 +832,19 @@ async def analyze_story(
             ],
             "documents": [{key: d[key] for key in ("name", "source", "used", "skipped", "characters")} for d in context["documents"]],
             "review": context_review,
+        },
+        # Deep analysis, when chosen: linked PR code and TestRail test cases vs the acceptance criteria.
+        "implementation": None if code is None else {"pull_requests": summarize_changes(code), "review": implementation_review},
+        "test_coverage": None if tests is None else {
+            "configured": tests["configured"],
+            "missing": tests["missing"],
+            "errors": tests["errors"],
+            "cases": [
+                {key: case[key] for key in ("id", "title", "url", "refs", "linked_by", "attachments")}
+                | {"steps": len(case["steps"]), "latest": case["latest"]}
+                for case in tests["cases"]
+            ],
+            "review": test_review,
         },
     }
     db.add(StoryAnalysis(work_item_id=item.id, input_hash=input_hash, provider=provider, created_at=now, result=json.dumps(result, default=str)))

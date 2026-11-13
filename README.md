@@ -649,7 +649,11 @@ On the Story analyzer page:
 
 You get the story's **health** (content quality from the LLM, plus delivery health computed from the board history), its tags and suggested tags, a colour-coded **timeline** of its stages, and an analysis of the **description**, **acceptance criteria**, **evidence** (attachments, inline images, linked PRs) and **comments** (key points, unanswered questions). Last comes a list of **suggested changes** to the story, including rewritten Given/When/Then criteria.
 
-Tick **Deep analysis** to also read the story's parent Feature and Epic, the Word, PDF and text attachments on the story and its parents, and documents you upload. A **Context** card then shows what the story misses or contradicts. Uploads are used for that analysis only and not stored.
+Tick **Deep analysis** to also read the story's parent Feature and Epic, the Word, PDF and text attachments on the story and its parents, and documents you upload. A **Context** card then shows what the story misses or contradicts. Uploads are used for that analysis only and not stored. Two more deep-analysis options:
+- **Code in the linked pull requests**: the PR diffs are read from GitHub and checked against each acceptance criterion (implemented / partial / not found), with missing tests and unrelated changes.
+- **TestRail test cases and evidence**: the story's TestRail cases (by **References**, or linked on the story), their latest results and attached evidence are checked against each acceptance criterion. Needs a `testrail:` section in `config.yaml` and `TESTRAIL_API_KEY` in `.env`, see [docs/story-analyzer.md#3c](docs/story-analyzer.md#3c-test-check-testrail-test-cases-and-evidence).
+
+Switch the page to **Create stories** to have the LLM split a requirement (text, documents and/or a parent Feature) into suggested user stories with acceptance criteria and estimates, following [`prompts/story-splitting.md`](prompts/story-splitting.md). Download them as a CSV for Azure Boards' **Import Work Items**, or copy them as Markdown. Nothing is written to Azure DevOps.
 
 Your team's rules for a good story live in [`prompts/story-analysis.md`](prompts/story-analysis.md). They're passed to the LLM as instructions; edit the file to match your process. Without an LLM, a rule-based review is shown.
 
@@ -739,6 +743,9 @@ To use an external database, set `DATABASE_URL` in an override and remove the `d
 | `ENABLE_API_DOCS` | `true` | Serve `/docs`, `/redoc`, `/openapi.json` |
 | `LOG_LEVEL` | `info` | App and uvicorn log level |
 | `STORY_ANALYSIS_INSTRUCTIONS` | `prompts/story-analysis.md` | Team instructions for the Story analyzer (Markdown, passed to the LLM) |
+| `STORY_SPLITTING_INSTRUCTIONS` | `prompts/story-splitting.md` | Team rules for splitting a requirement into stories (Create stories) |
+| `TESTRAIL_API_KEY` | – | TestRail API key for the Story analyzer's test check (the rest is in `config.yaml` → `testrail:`) |
+| `GITHUB_API_URL` | `https://api.github.com` | GitHub API used to read PR diffs for the code check; set it for GitHub Enterprise Server |
 | `DB_CONNECT_TIMEOUT_SECONDS` | `60` | How long startup keeps retrying the database before giving up (e.g. while the `db` container starts) |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies trusted for `X-Forwarded-*` |
 | `PORT` | `8000` | Port inside the container (map it with `APP_PORT`) |
@@ -846,6 +853,10 @@ app/
   story_analyzer.py     Story analyzer: facts, rule-based + LLM review, health, cache
   llm_client.py         JSON chat with the configured LLM (online → Ollama)
   story_context.py      Deep analysis context: parent Feature/Epic, attachments, uploads
+  story_checks.py       Deep analysis checks: code vs criteria, tests vs criteria (prompts, fallbacks)
+  pr_code.py            Changed files and diffs of linked GitHub PRs (for the code check)
+  testrail.py           TestRail client: cases by References, latest results, evidence
+  story_splitter.py     Create stories: split a requirement into suggested stories
   document_text.py      Text from Word (.docx), PDF and text documents
   database.py           Engine/session, automatic table + column + index creation
   models.py             SQLAlchemy models: Developer, Repository, PullRequest, Commit, PullRequestComment
@@ -862,7 +873,7 @@ frontend/               React + Vite UI: src/App.tsx (left panel + pages); src/c
                         src/exportHtml.ts (static HTML export of a page)
 docs/                   story-lifecycle.md (Story Quality), pull-request-timeline.md (PR timeline, links, grids),
                         story-analyzer.md (Story analyzer)
-prompts/                story-analysis.md (team instructions for the Story analyzer)
+prompts/                story-analysis.md (team instructions for the Story analyzer), story-splitting.md (rules for Create stories)
 scripts/                seed_data.sql (demo data), seed_devops.sql (Azure demo data), clear_data.sql (wipe data)
 tests/                  Backend unit tests
 config.yaml             Repositories to analyse

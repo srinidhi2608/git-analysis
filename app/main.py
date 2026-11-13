@@ -36,6 +36,8 @@ from app.lifecycle_config import load_lifecycle_config
 from app.document_text import MAX_DOCUMENT_BYTES, UPLOAD_ACCEPT, is_supported
 from app.story_analyzer import StoryNotFoundError, analyze_story, list_stories, load_instructions
 from app.story_context import MAX_UPLOADS, ContextOptions
+from app.story_splitter import MAX_STORIES, split_requirement
+from app.testrail import load_testrail_config
 from app.pr_timeline import build_pr_rows, pr_timeline_csv, summarize_prs
 from app.work_item_links import LinkIndex
 from app.story_lifecycle import (
@@ -1140,11 +1142,28 @@ async def story_analyzer_analyze_deep(
     use_cache: bool = Form(True),
     include_parents: bool = Form(True),
     include_attachments: bool = Form(True),
+    include_code: bool = Form(False),
+    include_tests: bool = Form(False),
     files: list[UploadFile] = File(default=[]),
     db: Session = Depends(get_db),
 ):
     """Deep analysis: also reads the parent Feature/Epic, attachments of the story and its
-    parents, and uploaded documents (multipart ``files``: Word .docx, PDF, text; not stored)."""
+    parents, and uploaded documents (multipart ``files``: Word .docx, PDF, text; not stored).
+    ``include_code`` checks the linked GitHub PRs' code and ``include_tests`` the linked
+    TestRail test cases against the acceptance criteria."""
+    uploads = await _read_uploads(files)
+    context = ContextOptions(
+        include_parents=include_parents,
+        include_attachments=include_attachments,
+        include_code=include_code,
+        include_tests=include_tests,
+        uploads=uploads,
+    )
+    return await _run_story_analysis(request, db, work_item_id, refresh, use_cache, context)
+
+
+async def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
+    """Uploaded documents (validated: count, type, size); not stored."""
     files = [upload for upload in files if upload.filename]
     if len(files) > MAX_UPLOADS:
         raise HTTPException(status_code=400, detail=f"Upload at most {MAX_UPLOADS} documents.")
@@ -1157,8 +1176,44 @@ async def story_analyzer_analyze_deep(
         if len(data) > MAX_DOCUMENT_BYTES:
             raise HTTPException(status_code=400, detail=f"{name} is larger than {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB.")
         uploads.append((name, data))
-    context = ContextOptions(include_parents=include_parents, include_attachments=include_attachments, uploads=uploads)
-    return await _run_story_analysis(request, db, work_item_id, refresh, use_cache, context)
+    return uploads
+
+
+@app.get("/api/story-analyzer/integrations")
+def story_analyzer_integrations():
+    """Which optional sources the deep analysis can use (no secrets returned)."""
+    testrail = load_testrail_config()
+    devops = load_devops_config()
+    return {
+        "azure_devops": {"configured": devops.configured, "missing": devops.missing()},
+        "github": {"token": bool(settings.github_token), "api_url": settings.github_api_url},
+        "testrail": {"configured": testrail.configured, "missing": testrail.missing(), "url": testrail.url or None},
+    }
+
+
+@app.post("/api/story-analyzer/split")
+async def story_analyzer_split(
+    request: Request,
+    requirement: str = Form(""),
+    parent_id: int | None = Form(None),
+    max_stories: int = Form(8),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+):
+    """Split a requirement (text, uploaded documents, optional parent Feature) into suggested stories."""
+    uploads = await _read_uploads(files)
+    if not requirement.strip() and not uploads and not parent_id:
+        raise HTTPException(status_code=400, detail="Enter the requirement, upload a document or give a parent Feature.")
+    if not 1 <= max_stories <= MAX_STORIES:
+        raise HTTPException(status_code=400, detail=f"max_stories must be between 1 and {MAX_STORIES}.")
+    try:
+        return await cancel_on_disconnect(
+            request, split_requirement(db, requirement, uploads, parent_id, load_devops_config(), max_stories)
+        )
+    except HTTPException as exc:
+        if exc.status_code == CLIENT_CLOSED_REQUEST:
+            logger.info("Story splitting cancelled: the client disconnected.")
+        raise
 
 
 # ---------------------------------------------------------------------------

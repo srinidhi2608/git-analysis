@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ExportHtmlButton from "./ExportHtmlButton";
+import StoryCreator from "./StoryCreator";
+import { MAX_UPLOADS, UPLOAD_ACCEPT, addUploads, fileSize } from "./uploads";
 import { KIND_COLORS, stageColorMap, type StageKind } from "./stageColors";
 
 // ---------------------------------------------------------------------------
@@ -87,7 +89,73 @@ interface Analysis {
     children: { id: number; type: string; title: string; state: string | null }[];
   };
   context: StoryContext | null;
+  implementation: Implementation | null;
+  test_coverage: TestCoverage | null;
 }
+
+interface Implementation {
+  pull_requests: {
+    pull_request: string;
+    url: string;
+    title: string | null;
+    status: string | null;
+    files: { filename: string; status: string; additions: number; deletions: number; is_test: boolean }[];
+    skipped_files: number;
+    error: string | null;
+  }[];
+  review: {
+    score: number | null;
+    assessment: string;
+    criteria: { criterion: string; status: "implemented" | "partial" | "not_found" | "unclear"; evidence: string }[];
+    unrelated_changes: string[];
+    missing_tests: string[];
+  } | null;
+}
+
+interface TestCoverage {
+  configured: boolean;
+  missing: string[];
+  errors: string[];
+  cases: {
+    id: number;
+    title: string;
+    url: string;
+    refs: string | null;
+    linked_by: string;
+    attachments: string[];
+    steps: number;
+    latest: { status: string; run: string; comment?: string; attachments?: string[] } | null;
+  }[];
+  review: {
+    score: number | null;
+    assessment: string;
+    criteria: { criterion: string; status: "covered" | "partial" | "not_covered"; test_cases: string[] }[];
+    tests_without_criteria: string[];
+    evidence_issues: string[];
+  } | null;
+}
+
+interface Integrations {
+  github: { token: boolean };
+  testrail: { configured: boolean; missing: string[]; url: string | null };
+}
+
+const CHECK_STYLES: Record<string, string> = {
+  implemented: "border-emerald-500/40 text-emerald-300",
+  covered: "border-emerald-500/40 text-emerald-300",
+  partial: "border-amber-500/40 text-amber-300",
+  unclear: "border-slate-500/40 text-slate-300",
+  not_found: "border-rose-500/40 text-rose-300",
+  not_covered: "border-rose-500/40 text-rose-300",
+};
+const CHECK_LABELS: Record<string, string> = {
+  implemented: "implemented",
+  partial: "partial",
+  unclear: "unclear",
+  not_found: "not found",
+  covered: "covered",
+  not_covered: "not covered",
+};
 
 interface StoryContext {
   parents: { id: number; type: string; title: string; state: string | null; url: string | null; attachments: string[]; description: string }[];
@@ -95,22 +163,6 @@ interface StoryContext {
   review: { score: number | null; assessment: string; gaps: string[]; conflicts: string[]; sources_used: string[] } | null;
 }
 
-// Uploads accepted for a deep analysis (the server checks the same limits).
-const UPLOAD_ACCEPT = ".docx,.pdf,.txt,.md,.csv,.log,.json,.xml,.yaml,.yml";
-const MAX_UPLOADS = 5;
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-
-function uploadProblem(file: File): string | null {
-  const extension = file.name.includes(".") ? `.${file.name.split(".").pop()!.toLowerCase()}` : "";
-  if (extension === ".doc") return `${file.name}: old Word format; save it as .docx`;
-  if (!UPLOAD_ACCEPT.split(",").includes(extension)) return `${file.name}: only Word (.docx), PDF and text files can be used`;
-  if (file.size > MAX_UPLOAD_BYTES) return `${file.name}: larger than 10 MB`;
-  return null;
-}
-
-function fileSize(bytes: number): string {
-  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 interface Instructions {
   path: string;
@@ -192,6 +244,37 @@ function Spinner({ label }: { label: string }) {
 // ---------------------------------------------------------------------------
 
 export default function StoryAnalyzerPage() {
+  const [mode, setMode] = useState<"analyze" | "create">("analyze");
+  const tab = (key: "analyze" | "create", label: string) => (
+    <button
+      aria-pressed={mode === key}
+      className={`rounded-lg px-4 py-2 text-sm font-medium transition ${mode === key ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"}`}
+      onClick={() => setMode(key)}
+      type="button"
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div>
+      <div className="mx-auto max-w-7xl px-6 pt-6 md:px-8" data-export="exclude">
+        <div aria-label="Story analyzer mode" className="inline-flex rounded-xl border border-slate-700 bg-slate-800 p-1" role="group">
+          {tab("analyze", "Analyze a story")}
+          {tab("create", "Create stories")}
+        </div>
+      </div>
+      {/* Both stay mounted so switching keeps the work in each. */}
+      <div hidden={mode !== "analyze"}>
+        <AnalyzeStory />
+      </div>
+      <div hidden={mode !== "create"}>
+        <StoryCreator />
+      </div>
+    </div>
+  );
+}
+
+function AnalyzeStory() {
   const [search, setSearch] = useState("");
   const [options, setOptions] = useState<StoryOption[]>([]);
   const [storyNumber, setStoryNumber] = useState("");
@@ -201,6 +284,9 @@ export default function StoryAnalyzerPage() {
   const [deep, setDeep] = useState(false);
   const [includeParents, setIncludeParents] = useState(true);
   const [includeAttachments, setIncludeAttachments] = useState(true);
+  const [includeCode, setIncludeCode] = useState(false);
+  const [includeTests, setIncludeTests] = useState(false);
+  const [integrations, setIntegrations] = useState<Integrations | null>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [fileError, setFileError] = useState("");
   const [instructions, setInstructions] = useState<Instructions | null>(null);
@@ -217,6 +303,10 @@ export default function StoryAnalyzerPage() {
       .then((res) => (res.ok ? res.json() : null))
       .then(setInstructions)
       .catch(() => setInstructions(null));
+    fetch("/api/story-analyzer/integrations")
+      .then((res) => (res.ok ? res.json() : null))
+      .then(setIntegrations)
+      .catch(() => setIntegrations(null));
     return () => abortRef.current?.abort();
   }, []);
 
@@ -253,6 +343,8 @@ export default function StoryAnalyzerPage() {
           form.append("use_cache", String(!rerun));
           form.append("include_parents", String(includeParents));
           form.append("include_attachments", String(includeAttachments));
+          form.append("include_code", String(includeCode));
+          form.append("include_tests", String(includeTests));
           files.forEach((file) => form.append("files", file, file.name));
           res = await fetch("/api/story-analyzer/analyze/deep", { method: "POST", body: form, signal: controller.signal });
         } else {
@@ -272,20 +364,11 @@ export default function StoryAnalyzerPage() {
         if (abortRef.current === controller) setRunning(false);
       }
     },
-    [refresh, rerun, deep, includeParents, includeAttachments, files],
+    [refresh, rerun, deep, includeParents, includeAttachments, includeCode, includeTests, files],
   );
 
   const addFiles = (list: FileList | null) => {
-    if (!list) return;
-    const problems: string[] = [];
-    const next = [...files];
-    for (const file of Array.from(list)) {
-      const problem = uploadProblem(file);
-      if (problem) problems.push(problem);
-      else if (next.some((existing) => existing.name === file.name && existing.size === file.size)) continue;
-      else if (next.length >= MAX_UPLOADS) problems.push(`${file.name}: at most ${MAX_UPLOADS} documents`);
-      else next.push(file);
-    }
+    const { files: next, problems } = addUploads(files, list);
     setFiles(next);
     setFileError(problems.join(" · "));
   };
@@ -400,6 +483,27 @@ export default function StoryAnalyzerPage() {
                 <label className="flex items-center gap-2 text-sm text-slate-300">
                   <input checked={includeAttachments} className="h-4 w-4 accent-indigo-500" onChange={(e) => setIncludeAttachments(e.target.checked)} type="checkbox" />
                   Attachments on the story and its parents
+                </label>
+                <label className="flex items-start gap-2 text-sm text-slate-300">
+                  <input checked={includeCode} className="mt-0.5 h-4 w-4 accent-indigo-500" onChange={(e) => setIncludeCode(e.target.checked)} type="checkbox" />
+                  <span>
+                    Code in the linked pull requests
+                    <span className="block text-xs text-slate-500">
+                      Checks the GitHub diffs against the acceptance criteria
+                      {integrations && !integrations.github.token ? " · GITHUB_TOKEN is not set" : ""}
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-slate-300">
+                  <input checked={includeTests} className="mt-0.5 h-4 w-4 accent-indigo-500" onChange={(e) => setIncludeTests(e.target.checked)} type="checkbox" />
+                  <span>
+                    TestRail test cases and evidence
+                    <span className={`block text-xs ${integrations && !integrations.testrail.configured ? "text-amber-300" : "text-slate-500"}`}>
+                      {integrations && !integrations.testrail.configured
+                        ? `TestRail is not configured (missing ${integrations.testrail.missing.join(", ")})`
+                        : "Linked cases, their latest results and attachments"}
+                    </span>
+                  </span>
                 </label>
                 <div>
                   <label
@@ -637,6 +741,8 @@ function AnalysisView({ analysis }: { analysis: Analysis }) {
       </div>
 
       {analysis.context && <ContextCard context={analysis.context} />}
+      {analysis.implementation && <ImplementationCard implementation={analysis.implementation} />}
+      {analysis.test_coverage && <TestCoverageCard coverage={analysis.test_coverage} />}
 
       <SuggestionsCard analysis={analysis} />
     </div>
@@ -938,6 +1044,165 @@ function SuggestionsCard({ analysis }: { analysis: Analysis }) {
             ))}
           </ol>
         </div>
+      )}
+    </Card>
+  );
+}
+
+function CheckBadge({ status }: { status: string }) {
+  return <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${CHECK_STYLES[status] ?? CHECK_STYLES.unclear}`}>{CHECK_LABELS[status] ?? status}</span>;
+}
+
+function ImplementationCard({ implementation }: { implementation: Implementation }) {
+  const review = implementation.review;
+  return (
+    <Card>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-white">Implementation: code vs acceptance criteria</h3>
+          <p className="mt-1 text-xs text-slate-500">Deep analysis of the linked GitHub pull requests; not part of the health score.</p>
+        </div>
+        {review?.score != null && (
+          <span className={`rounded-full px-2.5 py-0.5 text-sm font-medium text-slate-950 ${scoreColor(review.score)}`} title="Criteria implemented">
+            {review.score}
+          </span>
+        )}
+      </div>
+      {implementation.pull_requests.length === 0 ? (
+        <p className="mt-3 text-sm text-slate-400">No linked pull requests. Link them with AB#&lt;story id&gt; in the PR title or from the story in Azure Boards.</p>
+      ) : (
+        <>
+          {review && <p className="mt-3 text-sm text-slate-300">{review.assessment}</p>}
+          {review && review.criteria.length > 0 && (
+            <ul className="mt-3 space-y-2">
+              {review.criteria.map((row, index) => (
+                <li className="rounded-lg border border-slate-800 px-3 py-2" key={index}>
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-sm text-slate-100">{row.criterion}</span>
+                    <CheckBadge status={row.status} />
+                  </div>
+                  {row.evidence && <p className="mt-1 text-xs text-slate-400">{row.evidence}</p>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {review && review.missing_tests.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs uppercase tracking-wide text-slate-400">Missing tests</p>
+              <List items={review.missing_tests} tone="bad" />
+            </div>
+          )}
+          {review && review.unrelated_changes.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs uppercase tracking-wide text-slate-400">Changes unrelated to the story</p>
+              <List items={review.unrelated_changes} tone="bad" />
+            </div>
+          )}
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            {implementation.pull_requests.map((pr) => (
+              <div className="min-w-0 rounded-lg border border-slate-800 px-3 py-2 text-xs" key={pr.pull_request}>
+                <a className="text-sky-300 hover:underline" href={pr.url} rel="noreferrer" target="_blank">
+                  {pr.pull_request}
+                </a>{" "}
+                <span className="text-slate-200">{pr.title}</span> <span className="text-slate-500">({pr.status})</span>
+                {pr.error ? (
+                  <p className="mt-1 text-amber-300">{pr.error}</p>
+                ) : (
+                  <ul className="mt-1 max-h-40 space-y-0.5 overflow-auto font-mono text-[11px] text-slate-400">
+                    {pr.files.map((file) => (
+                      <li className="flex justify-between gap-2" key={file.filename}>
+                        <span className="truncate" title={file.filename}>
+                          {file.is_test ? "🧪 " : ""}
+                          {file.filename}
+                        </span>
+                        <span className="shrink-0">
+                          +{file.additions} −{file.deletions}
+                        </span>
+                      </li>
+                    ))}
+                    {pr.skipped_files > 0 && <li className="text-slate-500">{pr.skipped_files} lock/generated/binary file(s) not reviewed</li>}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function TestCoverageCard({ coverage }: { coverage: TestCoverage }) {
+  const review = coverage.review;
+  return (
+    <Card>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-white">Test coverage: TestRail vs acceptance criteria</h3>
+          <p className="mt-1 text-xs text-slate-500">Deep analysis of the linked test cases, latest results and evidence; not part of the health score.</p>
+        </div>
+        {review?.score != null && (
+          <span className={`rounded-full px-2.5 py-0.5 text-sm font-medium text-slate-950 ${scoreColor(review.score)}`} title="Criteria covered">
+            {review.score}
+          </span>
+        )}
+      </div>
+      {!coverage.configured ? (
+        <p className="mt-3 text-sm text-amber-200">TestRail is not configured: missing {coverage.missing.join(", ")}. See docs/story-analyzer.md.</p>
+      ) : (
+        <>
+          {review && <p className="mt-3 text-sm text-slate-300">{review.assessment}</p>}
+          {review && review.criteria.length > 0 && (
+            <ul className="mt-3 space-y-2">
+              {review.criteria.map((row, index) => (
+                <li className="flex items-start justify-between gap-3 rounded-lg border border-slate-800 px-3 py-2" key={index}>
+                  <span className="text-sm text-slate-100">
+                    {row.criterion}
+                    {row.test_cases.length > 0 && <span className="block text-xs text-slate-400">Tested by {row.test_cases.join(", ")}</span>}
+                  </span>
+                  <CheckBadge status={row.status} />
+                </li>
+              ))}
+            </ul>
+          )}
+          {review && review.evidence_issues.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs uppercase tracking-wide text-slate-400">Evidence and results</p>
+              <List items={review.evidence_issues} tone="bad" />
+            </div>
+          )}
+          {review && review.tests_without_criteria.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs uppercase tracking-wide text-slate-400">Test cases that match no criterion</p>
+              <List items={review.tests_without_criteria} tone="bad" />
+            </div>
+          )}
+          <p className="mt-4 text-xs uppercase tracking-wide text-slate-400">Linked test cases ({coverage.cases.length})</p>
+          {coverage.cases.length === 0 ? (
+            <p className="mt-1 text-sm text-slate-500">No TestRail case references this story.</p>
+          ) : (
+            <ul className="mt-2 space-y-1 text-sm">
+              {coverage.cases.map((testCase) => (
+                <li className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-800 px-3 py-1.5" key={testCase.id}>
+                  <span className="min-w-0">
+                    <a className="font-mono text-xs text-sky-300 hover:underline" href={testCase.url} rel="noreferrer" target="_blank">
+                      C{testCase.id}
+                    </a>{" "}
+                    <span className="text-slate-100">{testCase.title}</span>
+                    <span className="block text-xs text-slate-500">
+                      {testCase.steps} step(s) · linked by {testCase.linked_by}
+                      {[...testCase.attachments, ...(testCase.latest?.attachments ?? [])].length > 0
+                        ? ` · evidence: ${[...testCase.attachments, ...(testCase.latest?.attachments ?? [])].join(", ")}`
+                        : " · no attachments"}
+                    </span>
+                  </span>
+                  <span className="text-xs text-slate-300">{testCase.latest ? `${testCase.latest.status} · ${testCase.latest.run}` : "no recent result"}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {coverage.errors.length > 0 && <p className="mt-2 text-xs text-amber-300">{coverage.errors.join(" · ")}</p>}
+        </>
       )}
     </Card>
   );
