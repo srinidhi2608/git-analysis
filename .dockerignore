@@ -38,3 +38,4 @@ snapshots/
 
 # Documentation inside certs/ is not needed in the image
 certs/README.md
+!prompts/*.md

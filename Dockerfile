@@ -40,6 +40,7 @@ RUN pip install -r requirements.txt
 # Copy application source code and the default repository list
 COPY app/ ./app/
 COPY config.yaml ./
+COPY prompts/ ./prompts/
 
 # Copy the built React app so FastAPI can serve it
 COPY --from=node-builder /build/frontend/dist ./frontend/dist/

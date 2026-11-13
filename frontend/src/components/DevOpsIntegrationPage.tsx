@@ -473,7 +473,7 @@ export default function DevOpsIntegrationPage({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3" data-export="exclude">
             <span className="max-w-xs text-right text-xs text-slate-400">
               Fetches items changed in the selected range:
               <br />
@@ -490,7 +490,7 @@ export default function DevOpsIntegrationPage({
             </button>
           </div>
         </div>
-        {syncMessage && <p className="mt-4 rounded-lg bg-emerald-900/40 px-4 py-2 text-sm text-emerald-300">{syncMessage}</p>}
+        {syncMessage && <p className="mt-4 rounded-lg bg-emerald-900/40 px-4 py-2 text-sm text-emerald-300" data-export="exclude">{syncMessage}</p>}
         {pageError && <p className="mt-4 rounded-lg bg-red-900/40 px-4 py-2 text-sm text-red-300">{pageError}</p>}
         {config && !config.configured && (
           <p className="mt-4 text-sm text-slate-400">
@@ -556,10 +556,10 @@ export default function DevOpsIntegrationPage({
               unknown={unknownBranchPrs}
             />
           </div>
-          <button className="rounded-lg px-3 py-2 text-xs text-slate-400 hover:text-white" onClick={clearFilters} type="button">
+          <button className="rounded-lg px-3 py-2 text-xs text-slate-400 hover:text-white" data-export="exclude" onClick={clearFilters} type="button">
             Clear filters
           </button>
-          <div className="ml-auto flex flex-wrap gap-2">
+          <div className="ml-auto flex flex-wrap gap-2" data-export="exclude">
             <a
               className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
               href={`/api/devops/report?format=csv&${query}`}

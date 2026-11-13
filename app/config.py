@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     # How long startup keeps retrying the database (e.g. while the db container starts).
     db_connect_timeout_seconds: int = 60
+    # Team instructions for the Story Analyzer (Markdown, passed to the LLM).
+    story_analysis_instructions: str = "prompts/story-analysis.md"
+    # Instructions for splitting a requirement into stories (Markdown, passed to the LLM).
+    story_splitting_instructions: str = "prompts/story-splitting.md"
+    # GitHub REST API (code of PRs linked to a story); set for GitHub Enterprise Server.
+    github_api_url: str = "https://api.github.com"
+    # TestRail API key (test cases linked to a story); URL and user go in config.yaml `testrail`.
+    testrail_api_key: str | None = None
 
     # Snapshots of the ingested data (see app/snapshot.py).
     snapshot_dir: str = "snapshots"

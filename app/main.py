@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, TypeVar
 
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +33,11 @@ from app.snapshot import list_snapshots, load_snapshot, resolve_snapshot, save_s
 from app.teams import load_team_config
 from app.time_window import TimeWindow
 from app.lifecycle_config import load_lifecycle_config
+from app.document_text import MAX_DOCUMENT_BYTES, UPLOAD_ACCEPT, is_supported
+from app.story_analyzer import StoryNotFoundError, analyze_story, list_stories, load_instructions
+from app.story_context import MAX_UPLOADS, ContextOptions
+from app.story_splitter import MAX_STORIES, split_requirement
+from app.testrail import load_testrail_config
 from app.pr_timeline import build_pr_rows, pr_timeline_csv, summarize_prs
 from app.work_item_links import LinkIndex
 from app.story_lifecycle import (
@@ -1071,6 +1076,144 @@ def story_report_csv(report: str, filters: StoryFilters = Depends(story_filters)
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{report}-{stamp}.csv"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Story Analyzer
+# ---------------------------------------------------------------------------
+
+
+class StoryAnalyzeRequest(BaseModel):
+    work_item_id: int
+    # Reload the story, its links and comments from Azure DevOps first.
+    refresh: bool = True
+    # Reuse the last result when nothing changed (no LLM call).
+    use_cache: bool = True
+
+
+@app.get("/api/story-analyzer/stories")
+def story_analyzer_stories(search: str | None = None, db: Session = Depends(get_db)):
+    """Stories to pick from (most recently changed first), with when each was last analyzed."""
+    return {"stories": list_stories(db, load_lifecycle_config(), search)}
+
+
+@app.get("/api/story-analyzer/instructions")
+def story_analyzer_instructions():
+    """The team's analysis instructions passed to the LLM (prompts/story-analysis.md)."""
+    return load_instructions()
+
+
+async def _run_story_analysis(
+    request: Request, db: Session, work_item_id: int, refresh: bool, use_cache: bool, context: ContextOptions | None
+):
+    try:
+        return await cancel_on_disconnect(
+            request,
+            analyze_story(
+                db,
+                work_item_id,
+                load_lifecycle_config(),
+                load_team_config(),
+                devops=load_devops_config(),
+                refresh=refresh,
+                use_cache=use_cache,
+                context_options=context,
+            ),
+        )
+    except StoryNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HTTPException as exc:
+        if exc.status_code == CLIENT_CLOSED_REQUEST:
+            logger.info("Story analysis of %s cancelled: the client disconnected.", work_item_id)
+        raise
+
+
+@app.post("/api/story-analyzer/analyze")
+async def story_analyzer_analyze(request: Request, payload: StoryAnalyzeRequest, db: Session = Depends(get_db)):
+    """Analyze one story: health, content quality (LLM), delivery timeline and suggested changes."""
+    return await _run_story_analysis(request, db, payload.work_item_id, payload.refresh, payload.use_cache, None)
+
+
+@app.post("/api/story-analyzer/analyze/deep")
+async def story_analyzer_analyze_deep(
+    request: Request,
+    work_item_id: int = Form(...),
+    refresh: bool = Form(True),
+    use_cache: bool = Form(True),
+    include_parents: bool = Form(True),
+    include_attachments: bool = Form(True),
+    include_code: bool = Form(False),
+    include_tests: bool = Form(False),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+):
+    """Deep analysis: also reads the parent Feature/Epic, attachments of the story and its
+    parents, and uploaded documents (multipart ``files``: Word .docx, PDF, text; not stored).
+    ``include_code`` checks the linked GitHub PRs' code and ``include_tests`` the linked
+    TestRail test cases against the acceptance criteria."""
+    uploads = await _read_uploads(files)
+    context = ContextOptions(
+        include_parents=include_parents,
+        include_attachments=include_attachments,
+        include_code=include_code,
+        include_tests=include_tests,
+        uploads=uploads,
+    )
+    return await _run_story_analysis(request, db, work_item_id, refresh, use_cache, context)
+
+
+async def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
+    """Uploaded documents (validated: count, type, size); not stored."""
+    files = [upload for upload in files if upload.filename]
+    if len(files) > MAX_UPLOADS:
+        raise HTTPException(status_code=400, detail=f"Upload at most {MAX_UPLOADS} documents.")
+    uploads: list[tuple[str, bytes]] = []
+    for upload in files:
+        name = upload.filename or "document"
+        if not is_supported(name):
+            raise HTTPException(status_code=400, detail=f"{name}: only Word (.docx), PDF and text files ({UPLOAD_ACCEPT}) can be uploaded.")
+        data = await upload.read(MAX_DOCUMENT_BYTES + 1)
+        if len(data) > MAX_DOCUMENT_BYTES:
+            raise HTTPException(status_code=400, detail=f"{name} is larger than {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB.")
+        uploads.append((name, data))
+    return uploads
+
+
+@app.get("/api/story-analyzer/integrations")
+def story_analyzer_integrations():
+    """Which optional sources the deep analysis can use (no secrets returned)."""
+    testrail = load_testrail_config()
+    devops = load_devops_config()
+    return {
+        "azure_devops": {"configured": devops.configured, "missing": devops.missing()},
+        "github": {"token": bool(settings.github_token), "api_url": settings.github_api_url},
+        "testrail": {"configured": testrail.configured, "missing": testrail.missing(), "url": testrail.url or None},
+    }
+
+
+@app.post("/api/story-analyzer/split")
+async def story_analyzer_split(
+    request: Request,
+    requirement: str = Form(""),
+    parent_id: int | None = Form(None),
+    max_stories: int = Form(8),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+):
+    """Split a requirement (text, uploaded documents, optional parent Feature) into suggested stories."""
+    uploads = await _read_uploads(files)
+    if not requirement.strip() and not uploads and not parent_id:
+        raise HTTPException(status_code=400, detail="Enter the requirement, upload a document or give a parent Feature.")
+    if not 1 <= max_stories <= MAX_STORIES:
+        raise HTTPException(status_code=400, detail=f"max_stories must be between 1 and {MAX_STORIES}.")
+    try:
+        return await cancel_on_disconnect(
+            request, split_requirement(db, requirement, uploads, parent_id, load_devops_config(), max_stories)
+        )
+    except HTTPException as exc:
+        if exc.status_code == CLIENT_CLOSED_REQUEST:
+            logger.info("Story splitting cancelled: the client disconnected.")
+        raise
 
 
 # ---------------------------------------------------------------------------

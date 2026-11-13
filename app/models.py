@@ -139,6 +139,9 @@ class AzureWorkItem(Base):
     area_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     parent_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    # Rich-text (HTML) fields as stored in Azure Boards.
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    acceptance_criteria: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # System.ChangedDate when the state history was last downloaded (skip if unchanged).
     history_changed_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
@@ -154,6 +157,42 @@ class AzureWorkItem(Base):
     relations: Mapped[list["AzureWorkItemRelation"]] = relationship(
         "AzureWorkItemRelation", back_populates="work_item", cascade="all, delete-orphan"
     )
+    comments: Mapped[list["AzureWorkItemComment"]] = relationship(
+        "AzureWorkItemComment",
+        back_populates="work_item",
+        cascade="all, delete-orphan",
+        order_by="AzureWorkItemComment.created_at",
+    )
+
+
+class AzureWorkItemComment(Base):
+    """A discussion comment on a work item (Azure Boards "Discussion")."""
+
+    __tablename__ = "azure_work_item_comments"
+    __table_args__ = (UniqueConstraint("work_item_id", "comment_id", name="uq_azure_work_item_comment"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    work_item_id: Mapped[int] = mapped_column(Integer, ForeignKey("azure_work_items.id"), nullable=False, index=True)
+    comment_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    author: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    author_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    work_item: Mapped["AzureWorkItem"] = relationship("AzureWorkItem", back_populates="comments")
+
+
+class StoryAnalysis(Base):
+    """A cached Story Analyzer result (reused while the story and instructions are unchanged)."""
+
+    __tablename__ = "story_analyses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    work_item_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    result: Mapped[str] = mapped_column(Text, nullable=False)  # JSON
 
 
 class AzureWorkItemStateChange(Base):
